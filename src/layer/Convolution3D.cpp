@@ -17,7 +17,7 @@ static RegisterClassParameter<Convolution3D, LayerFactory> _register("Convolutio
  */
 Convolution3D::Convolution3D() : Layer4D(_register),
 								 _inhibition(true), _model_path(""), _draw(false), _epoch_number(0), _annealing(1.0), _min_th(0), _t_obj(0), _lr_th(0),
-								 _w(), _th(), _stdp(nullptr), _input_depth(0), _input_conv_depth(0), _impl(*this)
+								 _w(), _th(), _stdp(nullptr), _sampler(nullptr), _input_depth(0), _input_conv_depth(0), _impl(*this)
 {
 	add_parameter("draw", _draw);
 	add_parameter("save_weights", _save_weights);
@@ -32,14 +32,16 @@ Convolution3D::Convolution3D() : Layer4D(_register),
 	add_parameter("w", _w);						  // synaptic weights
 	add_parameter("th", _th);					  // internal threashould of neuron
 	add_parameter("stdp", _stdp);				  // learning rule - spike time dependant plasticity
+	add_parameter("sampler", _sampler);			  // patch sampling strategy
+	add_parameter("wta_infer", _wta_infer);
 }
 
 Convolution3D::Convolution3D(size_t filter_number, size_t filter_width, size_t filter_height, size_t filter_depth, std::string model_path,
 							 size_t stride_x, size_t stride_y, size_t stride_k, size_t padding_x, size_t padding_y, size_t padding_k)
-	: Layer4D(_register, filter_number, filter_width, filter_height, filter_depth, stride_x, stride_y, stride_k, padding_x, padding_y, padding_k),
-	  _inhibition(true), _model_path(model_path), _draw(false), _save_weights(false), _save_random_start(false), _log_spiking_neuron(false), _annealing(1.0),
-	  _min_th(0), _t_obj(0), _lr_th(0), _sample_number(0), _sample_count(0), _spike_count(0), _drawn_weights(0), _saved_weights(0), _logged_spiking_neuron(0), _saved_random_start(0),
-	  _w(), _th(), _stdp(nullptr), _input_depth(0), _impl(*this)
+		: Layer4D(_register, filter_number, filter_width, filter_height, filter_depth, stride_x, stride_y, stride_k, padding_x, padding_y, padding_k),
+		  _inhibition(true), _model_path(model_path), _draw(false), _save_weights(false), _save_random_start(false), _log_spiking_neuron(false), _annealing(1.0),
+		  _min_th(0), _t_obj(0), _lr_th(0), _sample_number(0), _sample_count(0), _spike_count(0), _drawn_weights(0), _saved_weights(0), _logged_spiking_neuron(0), _saved_random_start(0),
+		  _w(), _th(), _stdp(nullptr), _sampler(nullptr), _input_depth(0), _impl(*this)
 {
 	add_parameter("draw", _draw);
 	add_parameter("save_weights", _save_weights);
@@ -54,6 +56,8 @@ Convolution3D::Convolution3D(size_t filter_number, size_t filter_width, size_t f
 	add_parameter("w", _w);
 	add_parameter("th", _th);
 	add_parameter("stdp", _stdp);
+	add_parameter("sampler", _sampler);
+	add_parameter("wta_infer", _wta_infer);
 
 	// _patch_coo_collection = false;
 
@@ -127,43 +131,13 @@ void Convolution3D::process_train_sample(const std::string &label, Tensor<float>
 
 	if (current_pass < _epoch_number)
 	{
-		size_t x = 0;
-		size_t y = 0;
-		size_t z = 0;
-		size_t k = 0;
-		float t = 0.0;
-		// size_t _empty_sample_count = 0;
-		// bool _sample_contain_info = Tensor<float>::tensor_contain_info(sample);
-
-		// do // take the random patches around places where a spike exists
-		// {
-
-		if (_filter_width < _width)
-		{
-			std::uniform_int_distribution<size_t> rand_x(0, _width - _filter_width);
-			x = rand_x(experiment()->random_generator());
-		}
-		if (_filter_height < _height)
-		{
-			std::uniform_int_distribution<size_t> rand_y(0, _height - _filter_height);
-			y = rand_y(experiment()->random_generator());
-		}
-		if (_filter_conv_depth < _conv_depth)
-		{
-			std::uniform_int_distribution<size_t> rand_y(0, _conv_depth - _filter_conv_depth);
-			k = rand_y(experiment()->random_generator());
-		}
-
-		std::uniform_int_distribution<size_t> rand_z(0, _input_depth - 1);
-		z = rand_z(experiment()->random_generator());
-		t = sample.at(x, y, z, k);
-
-		// if (!_sample_contain_info)
-		// {
-		// 	_empty_sample_count++;
-		// 	break;
-		// }
-		// } while (t == 0.0 || t > 1); //(t > 0.0 && t < 1);
+		// Use the sampler to get the patch location
+		Patch3D patch = _sampler->sample(sample, _width, _height, _conv_depth,
+										 _filter_width, _filter_height, _filter_conv_depth,
+										 current_index, experiment()->random_generator());
+		size_t x = patch.x;
+		size_t y = patch.y;
+		size_t k = patch.k;
 
 		// even if _filter_conv_depth == 1, we are still taking random patches with a temporal depth.
 		Tensor<Time> input_time(Shape({_filter_width, _filter_height, _input_depth, _filter_conv_depth}));
@@ -232,6 +206,7 @@ void Convolution3D::on_epoch_end()
 {
 	_lr_th *= _annealing;
 	_stdp->adapt_parameters(_annealing);
+	_sampler->adapt_parameters(_annealing);
 }
 
 // This function is not extended because it's only for drawing.
@@ -263,10 +238,10 @@ Tensor<float> Convolution3D::reconstruct(const Tensor<float> &t) const
 
 				if (t.shape().number() > 3)
 					std::sort(std::begin(is), std::end(is), [&t, x, y, k](size_t i1, size_t i2)
-							  { return t.at(x, y, i1, k) > t.at(x, y, i2, k); });
+					{ return t.at(x, y, i1, k) > t.at(x, y, i2, k); });
 				else
 					std::sort(std::begin(is), std::end(is), [&t, x, y](size_t i1, size_t i2)
-							  { return t.at(x, y, i1) > t.at(x, y, i2); });
+					{ return t.at(x, y, i1) > t.at(x, y, i2); });
 
 				for (size_t i = 0; i < ki; i++)
 				{
