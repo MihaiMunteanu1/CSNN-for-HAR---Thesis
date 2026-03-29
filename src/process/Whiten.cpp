@@ -4,7 +4,8 @@ using namespace process;
 
 static RegisterClassParameter<Whitening, ProcessFactory> _register("Whitening");
 
-Whitening::Whitening() : TwoPassProcess(_register), _eps(0), _pca_compress(0), _max_sample(), _list(), _w() {
+//Whitening::Whitening() : TwoPassProcess(_register), _eps(0), _pca_compress(0), _max_sample(), _list(), _w() {
+Whitening::Whitening() : TwoPassProcess(_register), _eps(0), _pca_compress(0), _max_sample(), _list(), _w(), _mean() {
 	add_parameter("eps", _eps);
 	add_parameter("pca_compress", _pca_compress);
 	add_parameter("max_sample", _max_sample);
@@ -62,13 +63,14 @@ void Whitening::process_train(const std::string&, Tensor<float>& sample) {
 
 		int info;
 		float tmp_work;
-		sgesvd_("A", "N", &m, &n, cov.begin(), &lda, s.begin(), u.begin(), &ldu, nullptr, &ldvt, &tmp_work, &lwork, &info);
+		sgesvd_("A", "N", &m, &n, cov.begin(), &lda, s.begin(), u.begin(), &ldu, nullptr, &ldvt, &tmp_work, &lwork, &info,1,1);
 		lwork = tmp_work;
 		if(info != 0) {
 			throw std::runtime_error("Error in sgesvd_ (1):"+std::to_string(info));
 		}
-		Tensor<float> work(Shape({lwork}));
-		sgesvd_("A", "N", &m, &n, cov.begin(), &lda, s.begin(), u.begin(), &ldu, nullptr, &ldvt, work.begin(), &lwork, &info);
+//		Tensor<float> work(Shape({lwork}));
+		Tensor<float> work(Shape({static_cast<size_t>(lwork)}));
+		sgesvd_("A", "N", &m, &n, cov.begin(), &lda, s.begin(), u.begin(), &ldu, nullptr, &ldvt, work.begin(), &lwork, &info,1,1);
 		if(info != 0) {
 			throw std::runtime_error("Error in sgesvd_ (2):"+std::to_string(info));
 		}
