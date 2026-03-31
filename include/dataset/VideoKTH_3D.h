@@ -78,6 +78,13 @@ namespace dataset
 		 */
 		static const std::map<std::string, VideoHOGData>& get_hog_data();
 
+		/**
+		 * @brief Returns the sample mapping built during data loading.
+		 * Maps sample_index -> (video_key, group_idx) for correct HOG lookup.
+		 */
+		static const std::map<size_t, std::pair<std::string, size_t>>& get_train_sample_mapping();
+		static const std::map<size_t, std::pair<std::string, size_t>>& get_test_sample_mapping();
+
 	private:
 		void load_hog_json(const std::string &json_path);
 		std::string get_relative_video_key(const std::string &video_path) const;
@@ -120,6 +127,13 @@ namespace dataset
 		std::string _hog_json_path;
 		static std::map<std::string, VideoHOGData> _hog_data;
 		static bool _hog_data_loaded;
+
+		// Sample index -> (video_key, group_idx) mapping, built during next()
+		static std::map<size_t, std::pair<std::string, size_t>> _train_sample_mapping;
+		static std::map<size_t, std::pair<std::string, size_t>> _test_sample_mapping;
+		static size_t _train_sample_counter;
+		static size_t _test_sample_counter;
+		bool _is_train;
 	};
 
 }

@@ -340,14 +340,14 @@ def build_parser():
     p = argparse.ArgumentParser("KTH HOG bbox extractor")
 
 
-    p.add_argument("--temporal_kernel", type=int, default=3)
+    p.add_argument("--temporal_kernel", type=int, default=5)
     p.add_argument("--num_groups", type=int, default=10)
     p.add_argument("--frame_gap", type=int, default=3)
 
     p.add_argument("--frame_width", type=int, default=80)
     p.add_argument("--frame_height", type=int, default=60)
 
-    p.add_argument("--hit_threshold", type=float, default=-0.2)
+    p.add_argument("--hit_threshold", type=float, default=-0.5)
     p.add_argument("--mog2_fallback", action="store_true", default=True)
     p.add_argument("--mog2_min_area", type=int, default=220)
 
@@ -355,8 +355,10 @@ def build_parser():
     p.add_argument("--min_bbox_aspect", type=float, default=0.2)
     p.add_argument("--max_bbox_aspect", type=float, default=1.4)
 
+    p.add_argument("--output", type=str, default="",
+                   help="Output JSON path (default: ../hog/hog_person_data_{temporal_kernel}.json)")
     p.add_argument("--preview_dir", type=str, default="",
-                   help="If set, saves preview images here")
+                   help="Preview images dir (default: ../hog/hog_previews_{temporal_kernel})")
     p.add_argument("--preview_videos_per_action", type=int, default=2)
     p.add_argument("--preview_groups_per_video", type=int, default=3)
 
@@ -372,19 +374,15 @@ def main():
     hog = cv2.HOGDescriptor()
     hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-    args.input_path = os.getenv("INPUT_PATH", None)
+    args.input_path ="/home/mihai/kth_organized/" #os.getenv("INPUT_PATH")
+    #"/home/mihai/kth_organized/"
     if not args.input_path:
         print("ERROR: INPUT_PATH environment variable not set!")
         raise SystemExit(1)
 
-
-    ### No frames per group
-    args.temporal_kernel = 3
-
-
     args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + ".json"
 
-    args.preview_dir = "../hog/hog_previews_"+ str(args.temporal_kernel)
+    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel)
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     os.makedirs(args.preview_dir, exist_ok=True)

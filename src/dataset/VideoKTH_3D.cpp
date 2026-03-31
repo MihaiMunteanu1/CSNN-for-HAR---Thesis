@@ -7,6 +7,10 @@ using namespace dataset;
 // Static members
 std::map<std::string, VideoKTH_3D::VideoHOGData> VideoKTH_3D::_hog_data;
 bool VideoKTH_3D::_hog_data_loaded = false;
+std::map<size_t, std::pair<std::string, size_t>> VideoKTH_3D::_train_sample_mapping;
+std::map<size_t, std::pair<std::string, size_t>> VideoKTH_3D::_test_sample_mapping;
+size_t VideoKTH_3D::_train_sample_counter = 0;
+size_t VideoKTH_3D::_test_sample_counter = 0;
 
 /**
  * @brief Simple JSON string value parser - extracts value for a key from a JSON-like string.
@@ -352,6 +356,8 @@ VideoKTH_3D::VideoKTH_3D(const std::string &video_folder_path, const std::string
 	std::sort(_video_list.begin(), _video_list.end());
 	std::sort(_action_list.begin(), _action_list.end());
 
+	_is_train = (_video_folder_path.find("train") != std::string::npos);
+
 	_size = _video_list.size();
 
 	// Get the correct frame shape
@@ -407,6 +413,21 @@ std::pair<std::string, Tensor<InputType>> VideoKTH_3D::next()
 				target_frame_indices.push_back(fb.frame_idx);
 			}
 			use_hog_frames = true;
+		}
+	}
+
+	// Record the sample mapping for HOGSampler3D
+	{
+		size_t group_idx = _cursor_count;
+		if (_is_train)
+		{
+			_train_sample_mapping[_train_sample_counter] = {rel_key, group_idx};
+			_train_sample_counter++;
+		}
+		else
+		{
+			_test_sample_mapping[_test_sample_counter] = {rel_key, group_idx};
+			_test_sample_counter++;
 		}
 	}
 
@@ -653,4 +674,14 @@ uint32_t VideoKTH_3D::swap(uint32_t v)
 const std::map<std::string, VideoKTH_3D::VideoHOGData>& VideoKTH_3D::get_hog_data()
 {
 	return _hog_data;
+}
+
+const std::map<size_t, std::pair<std::string, size_t>>& VideoKTH_3D::get_train_sample_mapping()
+{
+	return _train_sample_mapping;
+}
+
+const std::map<size_t, std::pair<std::string, size_t>>& VideoKTH_3D::get_test_sample_mapping()
+{
+	return _test_sample_mapping;
 }

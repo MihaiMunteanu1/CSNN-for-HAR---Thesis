@@ -78,25 +78,22 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 
 		if (!hog_data.empty())
 		{
-			static std::vector<std::pair<std::string, size_t>> sample_to_video_group;
-			static bool mapping_built = false;
+			// Use the correct mapping built by VideoKTH_3D during data loading
+			const auto &sample_mapping = dataset::VideoKTH_3D::get_train_sample_mapping();
 
-			if (!mapping_built)
+			auto it = sample_mapping.find(current_index);
+			if (it != sample_mapping.end())
 			{
-				for (const auto &[video_key, vdata] : hog_data)
+				const auto &[video_key, group_idx] = it->second;
+				auto hog_it = hog_data.find(video_key);
+				if (hog_it == hog_data.end() || group_idx >= hog_it->second.groups.size())
 				{
-					for (size_t g = 0; g < vdata.groups.size(); g++)
-					{
-						sample_to_video_group.push_back({video_key, g});
-					}
+					// Video not in HOG data or group out of range -> random fallback
+					std::uniform_int_distribution<size_t> fallback_x(0, W - fw);
+					std::uniform_int_distribution<size_t> fallback_y(0, H - fh);
+					return {fallback_x(rng), fallback_y(rng)};
 				}
-				mapping_built = true;
-			}
-
-			if (current_index < sample_to_video_group.size())
-			{
-				const auto &[video_key, group_idx] = sample_to_video_group[current_index];
-				const auto &vdata = hog_data.at(video_key);
+				const auto &vdata = hog_it->second;
 				const auto &group = vdata.groups[group_idx];
 
 				size_t total_frames = group.frames.size();
@@ -114,10 +111,13 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 
 						if (box_width >= fw && box_height >= fh)
 						{
-							size_t min_x = std::max<size_t>(0, static_cast<size_t>(std::max(0, bx)));
-							size_t max_x = std::min<size_t>(W - fw, static_cast<size_t>(bx + bw) - fw);
-							size_t min_y = std::max<size_t>(0, static_cast<size_t>(std::max(0, by)));
-							size_t max_y = std::min<size_t>(H - fh, static_cast<size_t>(by + bh) - fh);
+							// bbox: bx=horizontal(cols), by=vertical(rows)
+							// patch.x → dim(0) = rows/vertical, clamped to W
+							// patch.y → dim(1) = cols/horizontal, clamped to H
+							size_t min_x = std::max<size_t>(0, static_cast<size_t>(std::max(0, by)));
+							size_t max_x = std::min<size_t>(W - fw, static_cast<size_t>(by + bh) - fw);
+							size_t min_y = std::max<size_t>(0, static_cast<size_t>(std::max(0, bx)));
+							size_t max_y = std::min<size_t>(H - fh, static_cast<size_t>(bx + bw) - fh);
 
 							if (max_x >= min_x && max_y >= min_y)
 							{
