@@ -20,11 +20,21 @@
 #include "analysis/SaveOutput.h"
 #include "sampler/RandomSampler3D.h"
 #include "sampler/HOGSampler3D.h"
+#include "layer/ConvolutionSampler3D.h"
 #include "dataset/VideoKTH_3D.h"
 
 int main(int argc, char **argv)
 {
-    Experiment<SparseIntermediateExecutionNew> experiment(argc, argv, "kth", false, false);
+    int seed = 40;
+    //Experiment<SparseIntermediateExecutionNew> experiment(argc, argv, "kth",, false, false);
+    Experiment<SparseIntermediateExecutionNew> experiment(
+            argv, argc,
+            "result/seed_" + std::to_string(seed),
+            "model/seed_" + std::to_string(seed),
+            "kth_" + std::to_string(seed),
+            seed, true,
+            false, false
+    );
 
     size_t frame_size_width = 80;
     size_t frame_size_height = 60;
@@ -32,13 +42,12 @@ int main(int argc, char **argv)
     size_t frame_gap = 0;
     size_t grey = 1;
     size_t threshold = 5;
-    size_t train_sample_per_video = 3;
-    size_t test_sample_per_video = 3;
+    size_t train_sample_per_video = 10;
+    size_t test_sample_per_video = 10;
     size_t draw = 0;
 
-    size_t tmp_filter_size = 2; // conv1: vede toate 3 frame-urile
-    size_t tmp_filter_size_next = 1;  // conv2, fc1: conv_depth=1, nu mai e temporal
-    size_t temp_stride = 1;
+    size_t tmp_filter_size = 2;
+    size_t temp_stride = 1; // 1/2
 
     experiment.push<process::DefaultOnOffFilter>(7, 1.0, 4.0);
     experiment.push<process::MaxScaling>();
@@ -60,6 +69,8 @@ int main(int argc, char **argv)
 
     std::cout<<hog_json_path<<std::endl;
 
+    dataset::VideoKTH_3D::reset_sample_mappings();
+
     experiment.add_train<dataset::VideoKTH_3D>(
             input_path + "train/", hog_json_path, video_frames, frame_gap, threshold,
             train_sample_per_video, grey, experiment.name(), draw,
@@ -77,8 +88,8 @@ int main(int argc, char **argv)
     float t_obj2 = 0.75f;
     float t_obj3 = 0.75f;
 
-
-    auto &conv1 = experiment.push<layer::Convolution3D>(5, 5, tmp_filter_size, 64, "", 1, 1, temp_stride);
+//    auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
+    auto &conv1 = experiment.push<layer::Convolution3D>(5, 5, tmp_filter_size, 96, "", 1, 1, temp_stride);
     conv1.set_name("conv1");
     conv1.parameter<bool>("draw").set(false);
     conv1.parameter<bool>("save_weights").set(true);
@@ -90,11 +101,12 @@ int main(int argc, char **argv)
     conv1.parameter<float>("min_th").set(1.0f);
     conv1.parameter<float>("t_obj").set(t_obj1);
     conv1.parameter<float>("lr_th").set(th_lr);
-    conv1.parameter<bool>("wta_infer").set(false);
+    conv1.parameter<bool>("wta_infer").set(true);
     conv1.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
     conv1.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(8.0, 0.1);
     conv1.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
     conv1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>();
+    //conv1.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
 
 
 #ifdef ENABLE_QT

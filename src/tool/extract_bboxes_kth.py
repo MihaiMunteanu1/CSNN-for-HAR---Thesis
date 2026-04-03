@@ -7,6 +7,7 @@ import json
 import os
 import cv2
 import numpy as np
+import math
 
 _HOG_SCALE_FACTOR = 3
 _HOG_MIN_W = 240
@@ -38,6 +39,146 @@ def select_best_bbox(bboxes):
         return None
     return max(bboxes, key=lambda bb: (float(bb.get("confidence", 0.0)), bb["w"] * bb["h"]))
 
+
+def bbox_iou(a, b):
+    ax1, ay1, ax2, ay2 = a["x"], a["y"], a["x"] + a["w"], a["y"] + a["h"]
+    bx1, by1, bx2, by2 = b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"]
+
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+
+    area_a = max(1, a["w"] * a["h"])
+    area_b = max(1, b["w"] * b["h"])
+    union = area_a + area_b - inter
+    return inter / float(union + 1e-9)
+
+def center_distance(a, b):
+    acx, acy = a["x"] + a["w"] / 2.0, a["y"] + a["h"] / 2.0
+    bcx, bcy = b["x"] + b["w"] / 2.0, b["y"] + b["h"] / 2.0
+    return math.hypot(acx - bcx, acy - bcy)
+
+
+
+def normalize_confidences(boxes, key="confidence"):
+    if not boxes:
+        return []
+    vals = [float(bb.get(key, 0.0)) for bb in boxes]
+    vmin, vmax = min(vals), max(vals)
+    out = []
+    for bb in boxes:
+        s = float(bb.get(key, 0.0))
+        if vmax - vmin < 1e-9:
+            ns = 0.5
+        else:
+            ns = (s - vmin) / (vmax - vmin + 1e-9)
+        c = dict(bb)
+        c["_norm_conf"] = ns
+        out.append(c)
+    return out
+
+def score_box(box, prev_box, frame_w, frame_h):
+    # score = confidence + size prior + temporal consistency
+    conf = float(box.get("_norm_conf", 0.5))
+    area_ratio = (box["w"] * box["h"]) / float(frame_w * frame_h + 1e-9)
+
+    # person prior: penalize too tiny/too huge
+    if area_ratio < 0.005:
+        area_term = -0.6
+    elif area_ratio > 0.70:
+        area_term = -0.5
+    else:
+        area_term = 0.25
+
+    temporal_term = 0.0
+    if prev_box is not None:
+        iou = bbox_iou(box, prev_box)
+        dist = center_distance(box, prev_box) / float(max(frame_w, frame_h) + 1e-9)
+        temporal_term = 0.8 * iou - 0.35 * dist
+
+    src = box.get("source", "")
+    src_bias = 0.10 if src == "hog" else 0.0  # slight preference for HOG when comparable
+
+    return conf + area_term + temporal_term + src_bias
+
+def merge_hog_mog2(hog_boxes, mog_boxes, prev_box, frame_w, frame_h, iou_merge_th=0.35):
+    """
+    Return list of selected boxes (usually 1), robustly fused.
+    """
+    # Normalize confidence per source
+    hog_n = normalize_confidences(hog_boxes)
+    mog_n = normalize_confidences(mog_boxes)
+
+    # If both exist, try pair-merge by IoU
+    fused = []
+    used_m = set()
+    for h in hog_n:
+        best_j = -1
+        best_iou = 0.0
+        for j, m in enumerate(mog_n):
+            if j in used_m:
+                continue
+            iou = bbox_iou(h, m)
+            if iou > best_iou:
+                best_iou = iou
+                best_j = j
+
+        if best_j >= 0 and best_iou >= iou_merge_th:
+            m = mog_n[best_j]
+            used_m.add(best_j)
+            # Weighted merge (favor HOG slightly in position, keep larger size tendency)
+            fx = int(round(0.6 * h["x"] + 0.4 * m["x"]))
+            fy = int(round(0.6 * h["y"] + 0.4 * m["y"]))
+            fw = int(round(0.5 * h["w"] + 0.5 * m["w"]))
+            fh = int(round(0.5 * h["h"] + 0.5 * m["h"]))
+            merged = {
+                "x": fx, "y": fy, "w": fw, "h": fh,
+                "confidence": 0.6 * float(h.get("confidence", 0.0)) + 0.4 * float(m.get("confidence", 0.0)),
+                "source": "hog+mog2"
+            }
+            fused.append(merged)
+        else:
+            fused.append(h)
+
+    # Add unpaired MOG2
+    for j, m in enumerate(mog_n):
+        if j not in used_m:
+            fused.append(m)
+
+    # If nothing fused, return empty
+    if not fused:
+        return []
+
+    # Score all and keep best
+    best = None
+    best_score = -1e18
+    for b in fused:
+        s = score_box(b, prev_box, frame_w, frame_h)
+        if s > best_score:
+            best_score = s
+            best = b
+
+    return [best] if best is not None else []
+
+def smooth_bbox(prev_box, cur_box, alpha=0.65):
+    """
+    EMA smoothing for stable temporal boxes.
+    alpha close to 1 => more inertia.
+    """
+    if prev_box is None:
+        return cur_box
+    out = {
+        "x": int(round(alpha * prev_box["x"] + (1.0 - alpha) * cur_box["x"])),
+        "y": int(round(alpha * prev_box["y"] + (1.0 - alpha) * cur_box["y"])),
+        "w": int(round(alpha * prev_box["w"] + (1.0 - alpha) * cur_box["w"])),
+        "h": int(round(alpha * prev_box["h"] + (1.0 - alpha) * cur_box["h"])),
+        "confidence": float(cur_box.get("confidence", 0.0)),
+        "source": cur_box.get("source", "fused")
+    }
+    return out
 
 def detect_persons_in_frame(frame_gray, hog, frame_width, frame_height, hit_threshold):
     det_w = max(frame_width * _HOG_SCALE_FACTOR, _HOG_MIN_W)
@@ -96,47 +237,134 @@ def detect_persons_mog2(frame_gray, fgbg, frame_width, frame_height, min_area):
     }]
 
 
+# def scan_video_frames(video_path, hog, args):
+#     cap = cv2.VideoCapture(video_path)
+#     if not cap.isOpened():
+#         print(f"  WARNING: Cannot open {video_path}")
+#         return [], False
+#
+#     all_frames = []
+#     idx = 0
+#     while True:
+#         ret, frame = cap.read()
+#         if not ret:
+#             break
+#         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+#         bboxes = detect_persons_in_frame(gray, hog, args.frame_width, args.frame_height, args.hit_threshold)
+#         all_frames.append((idx, bboxes))
+#         idx += 1
+#     cap.release()
+#
+#     det_count = sum(1 for _, b in all_frames if b)
+#     if det_count == 0 and args.mog2_fallback:
+#         cap = cv2.VideoCapture(video_path)
+#         if not cap.isOpened():
+#             return all_frames, False
+#
+#         fgbg = cv2.createBackgroundSubtractorMOG2(history=50, varThreshold=16, detectShadows=False)
+#         all_frames = []
+#         idx = 0
+#         while True:
+#             ret, frame = cap.read()
+#             if not ret:
+#                 break
+#             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+#             gray = cv2.resize(gray, (args.frame_width, args.frame_height))
+#             bboxes = detect_persons_mog2(gray, fgbg, args.frame_width, args.frame_height, args.mog2_min_area)
+#             all_frames.append((idx, bboxes))
+#             idx += 1
+#         cap.release()
+#         return all_frames, True
+#
+#     return all_frames, False
+
 def scan_video_frames(video_path, hog, args):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  WARNING: Cannot open {video_path}")
         return [], False
 
+    fgbg = cv2.createBackgroundSubtractorMOG2(
+        history=120, varThreshold=16, detectShadows=False
+    )
+
     all_frames = []
     idx = 0
+    used_any_mog2 = False
+    prev_selected = None
+    miss_streak = 0
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        bboxes = detect_persons_in_frame(gray, hog, args.frame_width, args.frame_height, args.hit_threshold)
+        if frame is None:
+            idx += 1
+            continue
+
+        frame_resized = cv2.resize(frame, (args.frame_width, args.frame_height))
+        gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+
+        # HOG candidates
+        hog_boxes = detect_persons_in_frame(
+            gray, hog, args.frame_width, args.frame_height, args.hit_threshold
+        )
+        hog_filtered = []
+        for b in hog_boxes:
+            bb = clip_bbox(b, args.frame_width, args.frame_height)
+            if passes_bbox_quality(
+                    bb, args.frame_width, args.frame_height,
+                    args.min_bbox_area_ratio, args.min_bbox_aspect, args.max_bbox_aspect
+            ):
+                hog_filtered.append(bb)
+
+        # MOG2 candidates
+        mog_boxes = detect_persons_mog2(
+            gray, fgbg, args.frame_width, args.frame_height, args.mog2_min_area
+        )
+        mog_filtered = []
+        for b in mog_boxes:
+            bb = clip_bbox(b, args.frame_width, args.frame_height)
+            if passes_bbox_quality(
+                    bb, args.frame_width, args.frame_height,
+                    args.min_bbox_area_ratio, args.min_bbox_aspect, args.max_bbox_aspect
+            ):
+                mog_filtered.append(bb)
+
+        # Fusion
+        selected = merge_hog_mog2(
+            hog_filtered,
+            mog_filtered if args.mog2_fallback else [],
+            prev_selected,
+            args.frame_width,
+            args.frame_height,
+            iou_merge_th=0.35
+        )
+
+        if selected:
+            # smooth single selected box
+            selected_box = smooth_bbox(prev_selected, selected[0], alpha=0.65)
+            selected_box = clip_bbox(selected_box, args.frame_width, args.frame_height)
+            bboxes = [selected_box]
+            prev_selected = selected_box
+            miss_streak = 0
+            if selected_box.get("source", "").find("mog2") != -1:
+                used_any_mog2 = True
+        else:
+            # short temporal carry (helps group continuity)
+            if prev_selected is not None and miss_streak < 2:
+                bboxes = [prev_selected]
+                miss_streak += 1
+            else:
+                bboxes = []
+                prev_selected = None
+                miss_streak += 1
+
         all_frames.append((idx, bboxes))
         idx += 1
+
     cap.release()
-
-    det_count = sum(1 for _, b in all_frames if b)
-    if det_count == 0 and args.mog2_fallback:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return all_frames, False
-
-        fgbg = cv2.createBackgroundSubtractorMOG2(history=50, varThreshold=16, detectShadows=False)
-        all_frames = []
-        idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-            gray = cv2.resize(gray, (args.frame_width, args.frame_height))
-            bboxes = detect_persons_mog2(gray, fgbg, args.frame_width, args.frame_height, args.mog2_min_area)
-            all_frames.append((idx, bboxes))
-            idx += 1
-        cap.release()
-        return all_frames, True
-
-    return all_frames, False
-
+    return all_frames, used_any_mog2
 
 def select_centered_groups(all_frames, args):
     total = len(all_frames)
@@ -342,23 +570,23 @@ def build_parser():
 
     p.add_argument("--temporal_kernel", type=int, default=5)
     p.add_argument("--num_groups", type=int, default=10)
-    p.add_argument("--frame_gap", type=int, default=3)
+    p.add_argument("--frame_gap", type=int, default=2)
 
-    p.add_argument("--frame_width", type=int, default=80)
-    p.add_argument("--frame_height", type=int, default=60)
+    p.add_argument("--frame_width", type=int, default=80) #80, 160
+    p.add_argument("--frame_height", type=int, default=60) #60, 120
 
-    p.add_argument("--hit_threshold", type=float, default=-0.5)
+    p.add_argument("--hit_threshold", type=float, default=-0.75)
     p.add_argument("--mog2_fallback", action="store_true", default=True)
-    p.add_argument("--mog2_min_area", type=int, default=220)
+    p.add_argument("--mog2_min_area", type=int, default=180) #180 pentru 80x60, 720
 
-    p.add_argument("--min_bbox_area_ratio", type=float, default=0.012)
-    p.add_argument("--min_bbox_aspect", type=float, default=0.2)
-    p.add_argument("--max_bbox_aspect", type=float, default=1.4)
+    p.add_argument("--min_bbox_area_ratio", type=float, default=0.008) #0.012 was before
+    p.add_argument("--min_bbox_aspect", type=float, default=0.22) #0.2 before
+    p.add_argument("--max_bbox_aspect", type=float, default=1.6) #1.4 before
 
     p.add_argument("--output", type=str, default="",
-                   help="Output JSON path (default: ../hog/hog_person_data_{temporal_kernel}.json)")
+                   help="Output JSON path (default: ../hog/hog_person_data_{temporal_kernel}_v2.json)")
     p.add_argument("--preview_dir", type=str, default="",
-                   help="Preview images dir (default: ../hog/hog_previews_{temporal_kernel})")
+                   help="Preview images dir (default: ../hog/hog_previews_{temporal_kernel}_v2)")
     p.add_argument("--preview_videos_per_action", type=int, default=2)
     p.add_argument("--preview_groups_per_video", type=int, default=3)
 
@@ -380,9 +608,9 @@ def main():
         print("ERROR: INPUT_PATH environment variable not set!")
         raise SystemExit(1)
 
-    args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + ".json"
+    args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + "_v2.json"
 
-    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel)
+    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel) +"_v2"
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     os.makedirs(args.preview_dir, exist_ok=True)

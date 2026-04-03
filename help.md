@@ -6,5 +6,6 @@ rm -rf *
 cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSE_GUI=NO
 make -j$(nproc)
 
+python3 ../src/tool/extract_bboxes_kth.py
 nohup ./KTH_3D > log_kth.txt 2>&1 &
 tail -f log_kth.txt
