@@ -8,7 +8,15 @@ using namespace sampler;
 
 static RegisterClassParameter<HOGSampler3D, SamplerFactory> _register("HOGSampler3D");
 
-HOGSampler3D::HOGSampler3D() : Sampler(_register), _cache_built(false)
+HOGSampler3D::HOGSampler3D() : Sampler(_register), _cache_built(false),
+	_cum_stride_x(1), _cum_stride_y(1)
+{
+}
+
+HOGSampler3D::HOGSampler3D(size_t cum_stride_x, size_t cum_stride_y)
+	: Sampler(_register), _cache_built(false),
+	  _cum_stride_x(cum_stride_x == 0 ? 1 : cum_stride_x),
+	  _cum_stride_y(cum_stride_y == 0 ? 1 : cum_stride_y)
 {
 }
 
@@ -119,12 +127,32 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 					if (fb.bboxes.empty()) continue;
 
 					auto [bx, by, bw, bh] = fb.bboxes[0];
-					if (bw < static_cast<int>(fw) || bh < static_cast<int>(fh)) continue;
 
-					size_t min_x = std::max<size_t>(0, static_cast<size_t>(std::max(0, by)));
-					size_t max_x = std::min<size_t>(W - fw, static_cast<size_t>(by + bh) - fw);
-					size_t min_y = std::max<size_t>(0, static_cast<size_t>(std::max(0, bx)));
-					size_t max_y = std::min<size_t>(H - fh, static_cast<size_t>(bx + bw) - fh);
+					// JSON stores bboxes in original pixel coordinates.
+					// bx, bw run along dim(1) (image x / cols) -> divide by _cum_stride_y
+					// by, bh run along dim(0) (image y / rows) -> divide by _cum_stride_x
+					// This transforms the bbox into the current layer's input feature-map space.
+					size_t pix_min_row = static_cast<size_t>(std::max(0, by));
+					size_t pix_max_row = static_cast<size_t>(std::max(0, by + bh));
+					size_t pix_min_col = static_cast<size_t>(std::max(0, bx));
+					size_t pix_max_col = static_cast<size_t>(std::max(0, bx + bw));
+
+					size_t feat_min_x = pix_min_row / _cum_stride_x;
+					size_t feat_max_x = pix_max_row / _cum_stride_x;
+					size_t feat_min_y = pix_min_col / _cum_stride_y;
+					size_t feat_max_y = pix_max_col / _cum_stride_y;
+
+					// Skip if the transformed bbox is too small to fit the filter.
+					if (feat_max_x <= feat_min_x || feat_max_y <= feat_min_y) continue;
+					if ((feat_max_x - feat_min_x) < fw || (feat_max_y - feat_min_y) < fh) continue;
+
+					// Valid top-left filter corners. W - fw / H - fh are safe here
+					// because sample() only calls us when filter_width < width &&
+					// filter_height < height.
+					size_t min_x = feat_min_x;
+					size_t max_x = std::min<size_t>(W - fw, feat_max_x - fw);
+					size_t min_y = feat_min_y;
+					size_t max_y = std::min<size_t>(H - fh, feat_max_y - fh);
 
 					if (max_x >= min_x && max_y >= min_y)
 						boxes[f] = {true, min_x, max_x, min_y, max_y};
@@ -191,24 +219,14 @@ Patch3D HOGSampler3D::sample(const Tensor<float> &sample,
 
 	if (filter_width < width && filter_height < height)
 	{
-		size_t input_depth = sample.shape().dim(2);
-		if (input_depth <= 3)
-		{
-			// Use pre-computed bounding boxes for person-guided sampling
-			auto [sample_x, sample_y] = sample_point_inside_person(
-				width, height, filter_width, filter_height,
-				rng, current_index, k);
-			x = sample_x;
-			y = sample_y;
-		}
-		else
-		{
-			// For deep feature maps, fall back to random
-			std::uniform_int_distribution<size_t> rand_x(0, width - filter_width);
-			std::uniform_int_distribution<size_t> rand_y(0, height - filter_height);
-			x = rand_x(rng);
-			y = rand_y(rng);
-		}
+		// Person-guided sampling at every layer. Bboxes are transformed from pixel
+		// space into the current layer's feature-map space using _cum_stride_x/y.
+		// If no bbox is available the inner function falls back to uniform random.
+		auto [sample_x, sample_y] = sample_point_inside_person(
+			width, height, filter_width, filter_height,
+			rng, current_index, k);
+		x = sample_x;
+		y = sample_y;
 	}
 
 	return Patch3D(x, y, k);
