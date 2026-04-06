@@ -333,6 +333,8 @@ VideoKTH_3D::VideoKTH_3D(const std::string &video_folder_path, const std::string
 	  _shape({VIDEO_KTH3D_WIDTH, VIDEO_KTH3D_HEIGHT, VIDEO_KTH3D_DEPTH, VIDEO_KTH3D_CONV_DEPTH}),
 	  _max_read(max_read), _hog_json_path(hog_json_path)
 {
+
+
 	_file_path = std::filesystem::current_path();
 
 	std::string _exp_name_conf = _exp_name;
@@ -557,17 +559,19 @@ std::pair<std::string, Tensor<InputType>> VideoKTH_3D::next()
 		}
 	}
 
-	if (_sample_per_video > 0)
-	{
-		if (_cursor_count == _sample_per_video)
-		{
-			_cursor++;
-			_cursor_count = 0;
-		}
-		_cursor_count++;
-	}
-	else
-		_cursor++;
+    if (_sample_per_video > 0)
+    {
+        _cursor_count++;
+        if (_cursor_count >= _sample_per_video)
+        {
+            _cursor++;
+            _cursor_count = 0;
+        }
+    }
+    else
+    {
+        _cursor++;
+    }
 
 	if (_draw == 1)
 		save_as_images(out);
@@ -604,7 +608,7 @@ uint32_t VideoKTH_3D::assign_label_to_sample(std::string _current_video_name)
 	return _label_count;
 }
 
-void VideoKTH_3D::set_frame_gap(int _frame_gap, cv::VideoCapture capture, cv::Mat skipFrame)
+void VideoKTH_3D::set_frame_gap(int _frame_gap, cv::VideoCapture& capture, cv::Mat& skipFrame)
 {
 	for (int i = 0; i < _frame_gap; i++)
 		capture >> skipFrame;
@@ -612,12 +616,27 @@ void VideoKTH_3D::set_frame_gap(int _frame_gap, cv::VideoCapture capture, cv::Ma
 
 bool VideoKTH_3D::movement_threshold(cv::Mat frame, cv::Mat next_frame)
 {
-	cv::Mat difference;
-	difference = frame - next_frame;
-	cv::Scalar sum = cv::sum(difference);
-	if (sum(0) < _threshold)
-		return true;
-	return false;
+    if (frame.empty() || next_frame.empty()) return true;
+    cv::Mat difference;
+    cv::absdiff(frame, next_frame, difference);
+    cv::Scalar s = cv::sum(difference);
+    double motion = 0.0;
+    for (int c = 0; c < difference.channels(); c++) motion += s[c];
+    return motion < static_cast<double>(_threshold);
+//	cv::Mat difference;
+//	difference = frame - next_frame;
+//	cv::Scalar sum = cv::sum(difference);
+//	if (sum(0) < _threshold)
+//		return true;
+//	return false;
+}
+
+void VideoKTH_3D::reset_sample_mappings()
+{
+    _train_sample_mapping.clear();
+    _test_sample_mapping.clear();
+    _train_sample_counter = 0;
+    _test_sample_counter = 0;
 }
 
 cv::Mat VideoKTH_3D::frame_preprocess(int _frame_preprocess, cv::Mat frame, cv::Mat next_frame)

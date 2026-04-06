@@ -8,7 +8,15 @@ using namespace sampler;
 
 static RegisterClassParameter<HOGSampler3D, SamplerFactory> _register("HOGSampler3D");
 
-HOGSampler3D::HOGSampler3D() : Sampler(_register), _cache_built(false)
+HOGSampler3D::HOGSampler3D() : Sampler(_register), _cache_built(false),
+	_cum_stride_x(1), _cum_stride_y(1)
+{
+}
+
+HOGSampler3D::HOGSampler3D(size_t cum_stride_x, size_t cum_stride_y)
+	: Sampler(_register), _cache_built(false),
+	  _cum_stride_x(cum_stride_x == 0 ? 1 : cum_stride_x),
+	  _cum_stride_y(cum_stride_y == 0 ? 1 : cum_stride_y)
 {
 }
 
@@ -33,12 +41,13 @@ void HOGSampler3D::ensure_cache_built()
 }
 
 std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
-	size_t W, size_t H, size_t fw, size_t fh,
-	std::default_random_engine &rng, size_t current_index, size_t temporal_index)
+		size_t W, size_t H, size_t fw, size_t fh,
+		std::default_random_engine &rng, size_t current_index, size_t temporal_index)
 {
-	if (_person_box_cache.find(current_index) != _person_box_cache.end())
+	auto cache_it = _person_box_cache.find(current_index);
+	if (cache_it != _person_box_cache.end())
 	{
-		const std::vector<BoundingBox> &boxes = _person_box_cache[current_index];
+		const std::vector<BoundingBox> &boxes = cache_it->second;
 
 		if (temporal_index < boxes.size() && boxes[temporal_index].has_person)
 		{
@@ -48,21 +57,19 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 			return {dist_x(rng), dist_y(rng)};
 		}
 
-		// Fallback: nearest detected frame
 		int best_frame = -1;
 		int min_dist = static_cast<int>(boxes.size());
 		for (size_t f = 0; f < boxes.size(); f++)
 		{
-			if (boxes[f].has_person)
+			if (!boxes[f].has_person) continue;
+			int dist = std::abs(static_cast<int>(f) - static_cast<int>(temporal_index));
+			if (dist < min_dist)
 			{
-				int dist = std::abs(static_cast<int>(f) - static_cast<int>(temporal_index));
-				if (dist < min_dist)
-				{
-					min_dist = dist;
-					best_frame = static_cast<int>(f);
-				}
+				min_dist = dist;
+				best_frame = static_cast<int>(f);
 			}
 		}
+
 		if (best_frame >= 0)
 		{
 			const BoundingBox &box = boxes[best_frame];
@@ -73,58 +80,82 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 	}
 	else
 	{
-		// Build cache for this sample from VideoKTH_3D's HOG data
 		const auto &hog_data = dataset::VideoKTH_3D::get_hog_data();
-
 		if (!hog_data.empty())
 		{
-			// Use the correct mapping built by VideoKTH_3D during data loading
-			const auto &sample_mapping = dataset::VideoKTH_3D::get_train_sample_mapping();
+			const auto &train_map = dataset::VideoKTH_3D::get_train_sample_mapping();
+			const auto &test_map  = dataset::VideoKTH_3D::get_test_sample_mapping();
 
-			auto it = sample_mapping.find(current_index);
-			if (it != sample_mapping.end())
+			std::string video_key;
+			size_t group_idx = 0;
+			bool found = false;
+
+			auto it_tr = train_map.find(current_index);
+			if (it_tr != train_map.end())
 			{
-				const auto &[video_key, group_idx] = it->second;
+				video_key = it_tr->second.first;
+				group_idx = it_tr->second.second;
+				found = true;
+			}
+			else
+			{
+				auto it_te = test_map.find(current_index);
+				if (it_te != test_map.end())
+				{
+					video_key = it_te->second.first;
+					group_idx = it_te->second.second;
+					found = true;
+				}
+			}
+
+			if (found)
+			{
 				auto hog_it = hog_data.find(video_key);
 				if (hog_it == hog_data.end() || group_idx >= hog_it->second.groups.size())
 				{
-					// Video not in HOG data or group out of range -> random fallback
 					std::uniform_int_distribution<size_t> fallback_x(0, W - fw);
 					std::uniform_int_distribution<size_t> fallback_y(0, H - fh);
 					return {fallback_x(rng), fallback_y(rng)};
 				}
-				const auto &vdata = hog_it->second;
-				const auto &group = vdata.groups[group_idx];
 
-				size_t total_frames = group.frames.size();
-				std::vector<BoundingBox> boxes(total_frames, {false, 0, 0, 0, 0});
+				const auto &group = hog_it->second.groups[group_idx];
+				std::vector<BoundingBox> boxes(group.frames.size(), {false, 0, 0, 0, 0});
 
-				for (size_t f = 0; f < total_frames; f++)
+				for (size_t f = 0; f < group.frames.size(); f++)
 				{
 					const auto &fb = group.frames[f];
-					if (!fb.bboxes.empty())
-					{
-						auto [bx, by, bw, bh] = fb.bboxes[0];
+					if (fb.bboxes.empty()) continue;
 
-						size_t box_width = static_cast<size_t>(bw);
-						size_t box_height = static_cast<size_t>(bh);
+					auto [bx, by, bw, bh] = fb.bboxes[0];
 
-						if (box_width >= fw && box_height >= fh)
-						{
-							// bbox: bx=horizontal(cols), by=vertical(rows)
-							// patch.x → dim(0) = rows/vertical, clamped to W
-							// patch.y → dim(1) = cols/horizontal, clamped to H
-							size_t min_x = std::max<size_t>(0, static_cast<size_t>(std::max(0, by)));
-							size_t max_x = std::min<size_t>(W - fw, static_cast<size_t>(by + bh) - fw);
-							size_t min_y = std::max<size_t>(0, static_cast<size_t>(std::max(0, bx)));
-							size_t max_y = std::min<size_t>(H - fh, static_cast<size_t>(bx + bw) - fh);
+					// JSON stores bboxes in original pixel coordinates.
+					// bx, bw run along dim(1) (image x / cols) -> divide by _cum_stride_y
+					// by, bh run along dim(0) (image y / rows) -> divide by _cum_stride_x
+					// This transforms the bbox into the current layer's input feature-map space.
+					size_t pix_min_row = static_cast<size_t>(std::max(0, by));
+					size_t pix_max_row = static_cast<size_t>(std::max(0, by + bh));
+					size_t pix_min_col = static_cast<size_t>(std::max(0, bx));
+					size_t pix_max_col = static_cast<size_t>(std::max(0, bx + bw));
 
-							if (max_x >= min_x && max_y >= min_y)
-							{
-								boxes[f] = {true, min_x, max_x, min_y, max_y};
-							}
-						}
-					}
+					size_t feat_min_x = pix_min_row / _cum_stride_x;
+					size_t feat_max_x = pix_max_row / _cum_stride_x;
+					size_t feat_min_y = pix_min_col / _cum_stride_y;
+					size_t feat_max_y = pix_max_col / _cum_stride_y;
+
+					// Skip if the transformed bbox is too small to fit the filter.
+					if (feat_max_x <= feat_min_x || feat_max_y <= feat_min_y) continue;
+					if ((feat_max_x - feat_min_x) < fw || (feat_max_y - feat_min_y) < fh) continue;
+
+					// Valid top-left filter corners. W - fw / H - fh are safe here
+					// because sample() only calls us when filter_width < width &&
+					// filter_height < height.
+					size_t min_x = feat_min_x;
+					size_t max_x = std::min<size_t>(W - fw, feat_max_x - fw);
+					size_t min_y = feat_min_y;
+					size_t max_y = std::min<size_t>(H - fh, feat_max_y - fh);
+
+					if (max_x >= min_x && max_y >= min_y)
+						boxes[f] = {true, min_x, max_x, min_y, max_y};
 				}
 
 				_person_box_cache[current_index] = boxes;
@@ -137,21 +168,19 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 					return {dist_x(rng), dist_y(rng)};
 				}
 
-				// Fallback: nearest detected frame
 				int best_frame = -1;
 				int min_dist = static_cast<int>(boxes.size());
 				for (size_t f = 0; f < boxes.size(); f++)
 				{
-					if (boxes[f].has_person)
+					if (!boxes[f].has_person) continue;
+					int dist = std::abs(static_cast<int>(f) - static_cast<int>(temporal_index));
+					if (dist < min_dist)
 					{
-						int dist = std::abs(static_cast<int>(f) - static_cast<int>(temporal_index));
-						if (dist < min_dist)
-						{
-							min_dist = dist;
-							best_frame = static_cast<int>(f);
-						}
+						min_dist = dist;
+						best_frame = static_cast<int>(f);
 					}
 				}
+
 				if (best_frame >= 0)
 				{
 					const BoundingBox &box = boxes[best_frame];
@@ -163,7 +192,6 @@ std::pair<size_t, size_t> HOGSampler3D::sample_point_inside_person(
 		}
 	}
 
-	// Ultimate fallback: random sampling
 	std::uniform_int_distribution<size_t> fallback_x(0, W - fw);
 	std::uniform_int_distribution<size_t> fallback_y(0, H - fh);
 	return {fallback_x(rng), fallback_y(rng)};
@@ -191,24 +219,14 @@ Patch3D HOGSampler3D::sample(const Tensor<float> &sample,
 
 	if (filter_width < width && filter_height < height)
 	{
-		size_t input_depth = sample.shape().dim(2);
-		if (input_depth <= 3)
-		{
-			// Use pre-computed bounding boxes for person-guided sampling
-			auto [sample_x, sample_y] = sample_point_inside_person(
-				width, height, filter_width, filter_height,
-				rng, current_index, k);
-			x = sample_x;
-			y = sample_y;
-		}
-		else
-		{
-			// For deep feature maps, fall back to random
-			std::uniform_int_distribution<size_t> rand_x(0, width - filter_width);
-			std::uniform_int_distribution<size_t> rand_y(0, height - filter_height);
-			x = rand_x(rng);
-			y = rand_y(rng);
-		}
+		// Person-guided sampling at every layer. Bboxes are transformed from pixel
+		// space into the current layer's feature-map space using _cum_stride_x/y.
+		// If no bbox is available the inner function falls back to uniform random.
+		auto [sample_x, sample_y] = sample_point_inside_person(
+			width, height, filter_width, filter_height,
+			rng, current_index, k);
+		x = sample_x;
+		y = sample_y;
 	}
 
 	return Patch3D(x, y, k);

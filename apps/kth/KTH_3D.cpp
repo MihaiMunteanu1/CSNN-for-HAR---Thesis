@@ -20,11 +20,21 @@
 #include "analysis/SaveOutput.h"
 #include "sampler/RandomSampler3D.h"
 #include "sampler/HOGSampler3D.h"
+#include "layer/ConvolutionSampler3D.h"
 #include "dataset/VideoKTH_3D.h"
 
 int main(int argc, char **argv)
 {
-    Experiment<SparseIntermediateExecutionNew> experiment(argc, argv, "kth", false, false);
+    int seed = 42;
+    //Experiment<SparseIntermediateExecutionNew> experiment(argc, argv, "kth",, false, false);
+    Experiment<SparseIntermediateExecutionNew> experiment(
+            argv, argc,
+            "result/seed_" + std::to_string(seed),
+            "model/seed_" + std::to_string(seed),
+            "kth_" + std::to_string(seed),
+            seed, true,
+            false, false
+    );
 
     size_t frame_size_width = 80;
     size_t frame_size_height = 60;
@@ -32,13 +42,12 @@ int main(int argc, char **argv)
     size_t frame_gap = 0;
     size_t grey = 1;
     size_t threshold = 5;
-    size_t train_sample_per_video = 3;
-    size_t test_sample_per_video = 3;
+    size_t train_sample_per_video = 6;
+    size_t test_sample_per_video = 6;
     size_t draw = 0;
 
-    size_t tmp_filter_size = 2; // conv1: vede toate 3 frame-urile
-    size_t tmp_filter_size_next = 1;  // conv2, fc1: conv_depth=1, nu mai e temporal
-    size_t temp_stride = 1;
+    size_t tmp_filter_size = 2;
+    size_t temp_stride = 1; // 1/2
 
     experiment.push<process::DefaultOnOffFilter>(7, 1.0, 4.0);
     experiment.push<process::MaxScaling>();
@@ -60,6 +69,8 @@ int main(int argc, char **argv)
 
     std::cout<<hog_json_path<<std::endl;
 
+    dataset::VideoKTH_3D::reset_sample_mappings();
+
     experiment.add_train<dataset::VideoKTH_3D>(
             input_path + "train/", hog_json_path, video_frames, frame_gap, threshold,
             train_sample_per_video, grey, experiment.name(), draw,
@@ -74,10 +85,11 @@ int main(int argc, char **argv)
     float w_lr = 0.1f;
 
     float t_obj1 = 0.75f;
-    float t_obj2 = 0.75f;
+    float t_obj2 = 0.60f;
     float t_obj3 = 0.75f;
 
-
+    // === conv1 === Input: (60, 80, 2, 5) -> Output: (56, 76, 96, 4)
+//    auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
     auto &conv1 = experiment.push<layer::Convolution3D>(5, 5, tmp_filter_size, 64, "", 1, 1, temp_stride);
     conv1.set_name("conv1");
     conv1.parameter<bool>("draw").set(false);
@@ -85,32 +97,112 @@ int main(int argc, char **argv)
     conv1.parameter<bool>("save_random_start").set(false);
     conv1.parameter<bool>("log_spiking_neuron").set(false);
     conv1.parameter<bool>("inhibition").set(true);
-    conv1.parameter<uint32_t>("epoch").set(150);
+    conv1.parameter<uint32_t>("epoch").set(50);
     conv1.parameter<float>("annealing").set(0.95f);
     conv1.parameter<float>("min_th").set(1.0f);
     conv1.parameter<float>("t_obj").set(t_obj1);
     conv1.parameter<float>("lr_th").set(th_lr);
-    conv1.parameter<bool>("wta_infer").set(false);
+    conv1.parameter<bool>("wta_infer").set(true);
     conv1.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
     conv1.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(8.0, 0.1);
     conv1.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
-    conv1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>();
+    // conv1 operates on the raw (pixel-space) input after OnOff/MaxScaling/LatencyCoding,
+    // so the cumulative spatial stride to its input is (1, 1).
+    conv1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+            static_cast<size_t>(1), static_cast<size_t>(1));
+    //conv1.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
 
+    // === pool1 === (56, 76, 96, 4) -> (28, 38, 96, 4)
+    auto &pool1 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+    pool1.set_name("pool1");
+
+    // === conv2 === (28, 38, 96, 4) -> (24, 34, 96, 3)
+    auto &conv2 = experiment.push<layer::Convolution3D>(5, 5, tmp_filter_size, 64, "", 1, 1, temp_stride);
+    conv2.set_name("conv2");
+    conv2.parameter<bool>("draw").set(false);
+    conv2.parameter<bool>("save_weights").set(true);
+    conv2.parameter<bool>("save_random_start").set(false);
+    conv2.parameter<bool>("log_spiking_neuron").set(false);
+    conv2.parameter<bool>("inhibition").set(true);
+    conv2.parameter<uint32_t>("epoch").set(75);
+    conv2.parameter<float>("annealing").set(0.95f);
+    conv2.parameter<float>("min_th").set(1.0f);
+    conv2.parameter<float>("t_obj").set(t_obj2);
+    conv2.parameter<float>("lr_th").set(th_lr);
+    conv2.parameter<bool>("wta_infer").set(true);
+    conv2.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
+    conv2.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(8.0, 0.1);
+    conv2.parameter<STDP>("stdp").set<stdp::Biological>(0.05f, 0.1f);
+    // conv2's input = pool1 output. Cumulative stride from pixel space to here is
+    // conv1.stride(1,1,1) * pool1.stride(2,2,1) = (2, 2) along the spatial axes.
+    // HOGSampler3D transforms pixel bboxes into this feature-map space.
+    conv2.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+            static_cast<size_t>(2), static_cast<size_t>(2));
+
+    // === pool2 === (24, 34, 96, 3) -> (12, 17, 96, 3)
+    auto &pool2 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+    pool2.set_name("pool2");
+//
+//    // === fc1 === (12, 17, 96, 3) -> (1, 1, 96, 2)  (fully connected: filter covers entire spatial extent)
+//    auto &fc1 = experiment.push<layer::Convolution3D>(12, 17, tmp_filter_size, 32, "", 1, 1, temp_stride);
+//    fc1.set_name("fc1");
+//    fc1.parameter<bool>("draw").set(false);
+//    fc1.parameter<bool>("save_weights").set(true);
+//    fc1.parameter<bool>("save_random_start").set(false);
+//    fc1.parameter<bool>("log_spiking_neuron").set(false);
+//    fc1.parameter<bool>("inhibition").set(true);
+//    fc1.parameter<uint32_t>("epoch").set(100);
+//    fc1.parameter<float>("annealing").set(0.95f);
+//    fc1.parameter<float>("min_th").set(1.0f);
+//    fc1.parameter<float>("t_obj").set(t_obj3);
+//    fc1.parameter<float>("lr_th").set(th_lr);
+//    fc1.parameter<bool>("wta_infer").set(true);
+//    fc1.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
+//    fc1.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(12.0, 0.1);
+//    fc1.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
+//    // fc1's input = pool2 output. Cumulative stride is
+//    // conv1(1) * pool1(2) * conv2(1) * pool2(2) = (4, 4).
+//    // Because fc1 is fully connected (filter == input spatial dims) the sampler
+//    // will always return (0,0,k); passing the strides just keeps the configuration
+//    // consistent with the rest of the stack.
+//    fc1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+//            static_cast<size_t>(4), static_cast<size_t>(4));
 
 #ifdef ENABLE_QT
     conv1.plot_threshold(true);
 	conv1.plot_reconstruction(true);
 #endif
 
+    // --- conv1 output ---
 //    auto &conv1_save = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
 //    conv1_save.add_analysis<analysis::SaveOutput>("conv1_train", "conv1_test", false);
 
     auto &conv1_out = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
-    conv1_out.add_postprocessing<process::SumPooling>(2, 2);
+    conv1_out.add_postprocessing<process::SumPooling>(4, 4);
     conv1_out.add_postprocessing<process::FeatureScaling>();
     conv1_out.add_analysis<analysis::Activity>();
     conv1_out.add_analysis<analysis::Coherence>();
     conv1_out.add_analysis<analysis::Svm>();
+
+    // --- conv2 output ---
+//    auto &conv2_save = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
+//    conv2_save.add_analysis<analysis::SaveOutput>("conv2_train", "conv2_test", false);
+
+    auto &conv2_out = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
+    conv2_out.add_postprocessing<process::SumPooling>(4, 4);
+    conv2_out.add_postprocessing<process::FeatureScaling>();
+    conv2_out.add_analysis<analysis::Activity>();
+    conv2_out.add_analysis<analysis::Coherence>();
+    conv2_out.add_analysis<analysis::Svm>();
+
+    // --- fc1 output ---
+//    auto &fc1_save = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
+//    fc1_save.add_analysis<analysis::SaveOutput>("fc1_train", "fc1_test", false);
+
+//    auto &fc1_out = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
+//    fc1_out.add_postprocessing<process::FeatureScaling>();
+//    fc1_out.add_analysis<analysis::Activity>();
+//    fc1_out.template add_analysis<analysis::Svm>();
 
 
     experiment.run(10000);

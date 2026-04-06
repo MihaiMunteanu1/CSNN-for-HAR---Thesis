@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find C:UsersmunteDesktopcsnn_simulator_v2 -type f -name *extract*)",
+      "Bash(node:*)",
+      "Bash(find /c/Users/munte/Desktop/csnn_simulator_v2 -iname *hog* -type f)",
+      "Bash(xargs grep:*)",
+      "Bash(grep:*)",
+      "Bash(python)",
+      "Bash(ls build*)",
+      "Bash(ls CMake*)",
+      "Bash(ls -d cmake-build-*)"
+    ]
+  }
+}

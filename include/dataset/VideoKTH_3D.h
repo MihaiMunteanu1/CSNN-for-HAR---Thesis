@@ -60,7 +60,7 @@ namespace dataset
 		virtual bool has_next() const;
 		virtual std::pair<std::string, Tensor<InputType>> next();
 		virtual uint32_t assign_label_to_sample(std::string _current_video_name);
-		virtual void set_frame_gap(int _frame_gap, cv::VideoCapture capture, cv::Mat skipFrame);
+		virtual void set_frame_gap(int _frame_gap, cv::VideoCapture& capture, cv::Mat& skipFrame);
 		virtual bool movement_threshold(cv::Mat frame, cv::Mat next_frame);
 		virtual cv::Mat frame_preprocess(int _frame_preprocess, cv::Mat frame, cv::Mat next_frame);
 		virtual void save_as_images(std::pair<std::string, Tensor<InputType>> out);
@@ -84,6 +84,9 @@ namespace dataset
 		 */
 		static const std::map<size_t, std::pair<std::string, size_t>>& get_train_sample_mapping();
 		static const std::map<size_t, std::pair<std::string, size_t>>& get_test_sample_mapping();
+
+		static void reset_sample_mappings();
+
 
 	private:
 		void load_hog_json(const std::string &json_path);
