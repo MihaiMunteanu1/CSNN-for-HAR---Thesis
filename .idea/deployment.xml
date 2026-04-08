@@ -1,16 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
-    <option name="confirmBeforeUploading" value="false" />
+  <component name="PublishConfigData" confirmBeforeDeletion="false">
+    <option name="confirmBeforeDeletion" value="false" />
     <serverData>
       <paths name="Remote Host (308c8ffa-fbda-4c06-95ae-c63252dfdf3a)">
         <serverdata>
           <mappings>
-            <mapping deploy="/tmp/tmp.8FzzKxCCAt/csnn_simulator_v2" local="$PROJECT_DIR$" />
+            <mapping deploy="/tmp/tmp.wJbYyB2MgX/csnn_simulator_v2" local="$PROJECT_DIR$" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-host" />
-            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-host" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="Remote HostGRID (a42d171d-f7a2-4cb6-8bf6-347b7e1693c9)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/mmuntean/csnn_project" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />
           </excludedPaths>
         </serverdata>
       </paths>

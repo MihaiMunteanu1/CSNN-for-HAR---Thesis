@@ -9,7 +9,10 @@
       "Bash(python)",
       "Bash(ls build*)",
       "Bash(ls CMake*)",
-      "Bash(ls -d cmake-build-*)"
+      "Bash(ls -d cmake-build-*)",
+      "Bash(command -v wsl)",
+      "Bash(command -v cmake)",
+      "Bash(wsl:*)"
     ]
   }
 }

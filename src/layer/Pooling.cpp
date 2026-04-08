@@ -9,8 +9,8 @@ Pooling::Pooling() : Layer3D(_register), _inh() {
 }
 
 Pooling::Pooling(size_t filter_width, size_t filter_height, size_t stride_x, size_t stride_y, size_t padding_x, size_t padding_y) :
-	Layer3D(_register, filter_width, filter_height, 0, stride_x, stride_y, padding_x, padding_y),
-	_inh(Shape({_width, _height, _depth})) {
+		Layer3D(_register, filter_width, filter_height, 0, stride_x, stride_y, padding_x, padding_y),
+		_inh(Shape({_width, _height, _depth})) {
 
 }
 
