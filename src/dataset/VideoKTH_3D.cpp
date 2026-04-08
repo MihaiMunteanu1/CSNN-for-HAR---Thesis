@@ -402,13 +402,16 @@ std::pair<std::string, Tensor<InputType>> VideoKTH_3D::next()
 	bool use_hog_frames = false;
 	std::vector<int> target_frame_indices;
 
+	// Issue #1: if sample_per_video > num_groups in JSON, wrap around instead
+	// of falling back to uniform random sampling. This guarantees we always
+	// use a valid HOG-detected group.
+	size_t group_idx = _cursor_count;
 	if (_hog_data.find(rel_key) != _hog_data.end())
 	{
 		const VideoHOGData &vdata = _hog_data[rel_key];
-		size_t group_idx = _cursor_count;
-
-		if (group_idx < vdata.groups.size())
+		if (!vdata.groups.empty())
 		{
+			group_idx = _cursor_count % vdata.groups.size();
 			const VideoGroup &group = vdata.groups[group_idx];
 			for (const auto &fb : group.frames)
 			{
@@ -420,7 +423,6 @@ std::pair<std::string, Tensor<InputType>> VideoKTH_3D::next()
 
 	// Record the sample mapping for HOGSampler3D
 	{
-		size_t group_idx = _cursor_count;
 		if (_is_train)
 		{
 			_train_sample_mapping[_train_sample_counter] = {rel_key, group_idx};
@@ -657,7 +659,24 @@ cv::Mat VideoKTH_3D::frame_preprocess(int _frame_preprocess, cv::Mat frame, cv::
 void VideoKTH_3D::reset()
 {
 	_cursor = 0;
+	_cursor_count = 0;
 	_label_count = 0;
+
+	// Issue #2: clear the sample->(video,group) mapping for THIS split at
+	// the start of every epoch. next() rebuilds it from scratch as samples
+	// are produced. Without this, the static counter would keep growing
+	// across epochs while HOGSampler3D queries with per-epoch indices
+	// (0..N-1), causing stale lookups.
+	if (_is_train)
+	{
+		_train_sample_mapping.clear();
+		_train_sample_counter = 0;
+	}
+	else
+	{
+		_test_sample_mapping.clear();
+		_test_sample_counter = 0;
+	}
 }
 
 void VideoKTH_3D::close()

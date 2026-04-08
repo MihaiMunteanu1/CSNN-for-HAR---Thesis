@@ -141,9 +141,9 @@ void Convolution3D::process_train_sample(const std::string &label, Tensor<float>
 
         // even if _filter_conv_depth == 1, we are still taking random patches with a temporal depth.
         Tensor<Time> input_time(Shape({_filter_width, _filter_height, _input_depth, _filter_conv_depth}));
-        for (size_t cx = 0; cx < _filter_height; cx++)
+        for (size_t cx = 0; cx < _filter_width; cx++) //_filter_height
         {
-            for (size_t cy = 0; cy < _filter_width; cy++)
+            for (size_t cy = 0; cy < _filter_height; cy++) //_filter_width
             {
                 for (size_t cz = 0; cz < _input_depth; cz++)
                 {

@@ -205,6 +205,14 @@ Patch3D HOGSampler3D::sample(const Tensor<float> &sample,
 {
 	ensure_cache_built();
 
+	// Issue #4: clear per-sample bbox cache at the start of each epoch.
+	// `current_index` is the per-epoch sample index (0..N-1) and resets to 0
+	// every epoch. Without this clear, entries from a previous epoch would
+	// shadow new sample-to-bbox mappings (and the train/test mapping counters
+	// reset in VideoKTH_3D::reset() would no longer match cached entries).
+	if (current_index == 0)
+		_person_box_cache.clear();
+
 	size_t k = 0;
 
 	// Select temporal index randomly

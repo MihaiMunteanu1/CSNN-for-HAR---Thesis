@@ -212,7 +212,7 @@ Prin STDP, filtrele convoluționale se **auto-organizează** pentru a recunoașt
 │                                                                           │
 │  599 videoclipuri KTH (160×120, 25 fps)                                   │
 │         │                                                                 │
-│         ▼                                                                 │
+│        ▼                                                                 │
 │  extract_bboxes_kth.py                                                    │
 │    • Redimensionare la 80×60                                              │
 │    • HOG (upscale 3×→240×180) + MOG2 (background subtraction)             │

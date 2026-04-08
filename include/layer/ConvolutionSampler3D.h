@@ -1,21 +1,36 @@
 #pragma once
 
 #include "layer/Convolution3D.h"
+#include "Tensor.h"
+#include <vector>
+#include <mutex>
 
 namespace layer {
 
 /**
  * ConvolutionSampler3D
  * --------------------
- * Thin wrapper around Convolution3D, introduced to keep a separate
- * semantic layer name for sampler-driven experiments (HOG/Random),
- * without modifying the original Convolution3D implementation.
+ * Drop-in replacement for Convolution3D that overrides train()/test() to
+ * parallelize the inner work across the filter index `z` using TBB
+ * (via std::execution::par). Behavior is functionally identical to
+ * Convolution3D when `inhibition=true` (the typical KTH setup) and
+ * weights/thresholds end up bit-identical because we partition by z and
+ * each thread writes only to its own z-slice -> zero race condition.
  *
- * Behavior is identical to Convolution3D and supports the same parameters,
- * including:
- *   - sampler: Sampler (HOGSampler3D / RandomSampler3D)
- *   - stdp
- *   - w, th, etc.
+ * Why partitioning by z is safe:
+ *   - Activations  _a[x,y,z,k]   : indexed by z, disjoint per thread.
+ *   - Inhibition   _inh[x,y,z,k] : same.
+ *   - Weights      w[x,y,zi,z,k] : the slice for a given z is owned by
+ *                                  exactly one thread.
+ *   - Thresholds   th[z]         : in test, read-only. In train, the
+ *                                  threshold update touches all z's, so
+ *                                  the train override keeps that step
+ *                                  sequential and only parallelizes the
+ *                                  per-spike accumulator and weight
+ *                                  update over (x,y,zi,k) for the
+ *                                  winning filter.
+ *   - Output spikes              : each thread appends to its own
+ *                                  thread-local vector; merged at the end.
  */
     class ConvolutionSampler3D : public Convolution3D {
     public:
@@ -25,6 +40,46 @@ namespace layer {
                              std::string model_path = "",
                              size_t stride_x = 1, size_t stride_y = 1, size_t stride_k = 1,
                              size_t padding_x = 0, size_t padding_y = 0, size_t padding_k = 0);
+
+        // Overrides
+        Shape compute_shape(const Shape &previous_shape) override;
+
+        void train(const std::string &label,
+                   const std::vector<Spike> &input_spike,
+                   const Tensor<Time> &input_time,
+                   std::vector<Spike> &output_spike) override;
+
+        void test(const std::string &label,
+                  const std::vector<Spike> &input_spike,
+                  const Tensor<Time> &input_time,
+                  std::vector<Spike> &output_spike) override;
+
+        void on_epoch_end() override;
+
+    private:
+        // Local activation / inhibition state. We can't reuse the base
+        // class' (which lives in the private _priv::Convolution3DImpl).
+        Tensor<float> _a_local;
+        Tensor<bool>  _inh_local;
+
+        // Cached shape info derived from compute_shape.
+        size_t _input_depth_local;
+        size_t _input_conv_depth_local;
+
+        // Number of worker threads to use; lazily set from
+        // std::thread::hardware_concurrency() on first call.
+        size_t _num_threads;
+
+        // Save/Load support (the base Convolution3DImpl handles these, but our
+        // override bypasses it, so we replicate the minimum needed here).
+        std::string _model_path_local;
+        std::string _last_label;
+        bool        _weights_loaded;
+        bool        _weights_saved;
+
+        void ensure_state_allocated();
+        void try_load_weights(const std::string &label);
+        void try_save_weights(const std::string &label);
     };
 
 } // namespace layer
