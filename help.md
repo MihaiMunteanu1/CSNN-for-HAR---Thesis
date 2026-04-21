@@ -25,8 +25,4 @@ oarsub -I -p "cluster='roazhon13'" -l walltime=5:00:00
 
 ## Iarasi de rulat:
 sudo-g5k apt-get update
-sudo-g5k apt-get install -y libopencv-dev
-sudo-g5k apt-get update
-sudo-g5k apt-get install -y liblapacke-dev liblapack-dev libblas-dev
-sudo-g5k apt-get update
-sudo apt-get install libopenblas-dev 
+sudo-g5k apt-get install -y libopencv-dev liblapacke-dev liblapack-dev libblas-dev libopenblas-dev

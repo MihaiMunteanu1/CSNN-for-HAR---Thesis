@@ -225,11 +225,15 @@ void LoadWeights(std::string fileName, std::string label, Tensor<float> &in)
     {
         ASSERT_DEBUG("JSON PARSE FAILED");
     }
+    bool found = false;
+    std::size_t last_idx = 0;
     for (std::size_t _s = 0; _s < doc.size(); ++_s)
     {
+        last_idx = _s;
         std::string _label = doc[_s]["label"];
         if (label == _label)
         {
+            found = true;
             std::vector<float> _fusedSampleVector;
             std::string _data = doc[_s]["data"];
             std::replace(_data.begin(), _data.end(), '[', ' ');
@@ -248,6 +252,27 @@ void LoadWeights(std::string fileName, std::string label, Tensor<float> &in)
             for (size_t i = 0; i < _fusedSampleVector.size(); i++)
                 in.at_index(i) = _fusedSampleVector[i];
         }
+    }
+    // Fallback: if no label matched, load the last entry in the file.
+    if (!found && doc.size() > 0)
+    {
+        std::vector<float> _fusedSampleVector;
+        std::string _data = doc[last_idx]["data"];
+        std::replace(_data.begin(), _data.end(), '[', ' ');
+        std::replace(_data.begin(), _data.end(), ']', ' ');
+        std::string delimiter = ",";
+
+        size_t pos = 0;
+        std::string token;
+        while ((pos = _data.find(delimiter)) != std::string::npos)
+        {
+            token = _data.substr(0, pos);
+            _fusedSampleVector.push_back(std::stof(token, nullptr));
+            _data.erase(0, pos + delimiter.length());
+        }
+
+        for (size_t i = 0; i < _fusedSampleVector.size(); i++)
+            in.at_index(i) = _fusedSampleVector[i];
     }
 }
 

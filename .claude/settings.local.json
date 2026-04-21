@@ -12,7 +12,10 @@
       "Bash(ls -d cmake-build-*)",
       "Bash(command -v wsl)",
       "Bash(command -v cmake)",
-      "Bash(wsl:*)"
+      "Bash(wsl:*)",
+      "mcp__gitnexus__query",
+      "mcp__gitnexus__context",
+      "mcp__gitnexus__impact"
     ]
   }
 }

@@ -568,7 +568,7 @@ def build_parser():
     p = argparse.ArgumentParser("KTH HOG bbox extractor")
 
 
-    p.add_argument("--temporal_kernel", type=int, default=5)
+    p.add_argument("--temporal_kernel", type=int, default=7) #sau un 15
     p.add_argument("--num_groups", type=int, default=10)
     p.add_argument("--frame_gap", type=int, default=2)
 

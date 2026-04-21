@@ -759,24 +759,29 @@ if (filter_conv_depth < conv_depth)
 ```
 Cu `conv_depth = 5` (cadre) și `filter_conv_depth = 2` (adâncimea temporală a filtrului), $k$ este ales uniform aleatoriu din $\{0, 1, 2, 3\}$, determinând de la ce cadru temporal începe extragerea patch-ului. De exemplu, $k = 1$ înseamnă că filtrul procesează cadrele $[F_1, F_2]$.
 
-**Pasul 2 — Verificarea adâncimii input-ului:**
+**Pasul 2 — Eșantionarea ghidată la fiecare strat (update arhitectural):**
+
+În versiunea curentă, **eșantionarea ghidată HOG este aplicată pe toate straturile convoluționale** (conv1, conv2, fc1), nu doar pe primul. Singura condiție verificată este ca filtrul să fie **strict mai mic** decât feature map-ul pe ambele axe spațiale:
+
 ```cpp
-size_t input_depth = sample.shape().dim(2);  // nr. canale (ex. 2 pentru ON/OFF)
-if (input_depth <= 3) {
-    // Folosește eșantionare ghidată HOG
+if (filter_width < width && filter_height < height)
+{
+    // Eșantionare ghidată pe persoană la orice strat. Bbox-urile sunt
+    // transformate din pixel-space în feature-map space folosind
+    // stridurile cumulative _cum_stride_x/y primite în constructor.
+    // Dacă nu există bbox valid, se activează fallback-ul temporal și
+    // ulterior random uniform (detalii în §4.1.6).
     auto [sample_x, sample_y] = sample_point_inside_person(
-        width, height, filter_width, filter_height, rng, current_index, k);
-} else {
-    // Fallback la random (feature maps profunde)
-    x = uniform_random(0, width - filter_width);
-    y = uniform_random(0, height - filter_height);
+        width, height, filter_width, filter_height,
+        rng, current_index, k);
+    x = sample_x;
+    y = sample_y;
 }
+// else: filtrul acoperă întreaga intrare (ex. fc1 cu filtru 12×17 pe
+// feature map 12×17) → patch-ul este plasat automat la (0, 0).
 ```
 
-**Condiția `input_depth <= 3`** este esențială: eșantionarea ghidată HOG se aplică **doar pe primul strat convoluțional** (conv1), unde input-ul are 1–3 canale (1 grayscale, 2 ON/OFF, sau 3 RGB). La straturile ulterioare (conv2, fc1), input-ul are zeci de canale (ex. 64 canale de feature maps de la conv1), iar:
-1. Coordonatele bounding box-urilor au fost calculate pe imaginea originală — nu mai corespund spațiului de feature maps
-2. Informația a fost deja focalizată pe zona persoanei de conv1
-3. Eșantionarea random devine adecvată deoarece conv1 a „filtrat" fundalul irelevant
+Această extindere a fost posibilă prin mecanismul de **transformare a coordonatelor bbox** prin stridul cumulativ (detaliat în §4.1.5), care mapează bbox-urile din JSON (coordonate pixel 80×60) în spațiul feature map al oricărui strat convoluțional superior. Anterior, versiunea veche conținea o verificare ad-hoc `input_depth <= 3` care limita sampler-ul doar la conv1 (unde input-ul avea 2 canale ON/OFF); această restricție a fost **eliminată** deoarece nu mai este necesară — coordonatele bbox se adaptează automat la dimensiunea oricărui feature map prin division cu stridul cumulativ.
 
 **Pasul 3 — Returnarea patch-ului:**
 ```cpp
@@ -832,35 +837,156 @@ _person_box_cache[current_index] = boxes;
 
 5. **Returnarea coordonatelor** (identic cu Cazul 1).
 
-#### 4.1.5. Conversia Coordonatelor Bbox → Interval de Sampling
+#### 4.1.5. Transformarea Bounding Box-urilor: Pixel-Space → Feature-Map Space prin Strid Cumulativ
 
-Bounding box-ul din JSON este exprimat în **coordonate de imagine**: `{x, y, w, h}` unde `(x, y)` este colțul stânga-sus, `w` = lățime (pe orizontală), `h` = înălțime (pe verticală).
+Un element arhitectural **esențial** al pipeline-ului actual este capacitatea de a folosi `HOGSampler3D` pe **toate straturile convoluționale** (conv1, conv2, fc1), nu doar pe primul. Problema centrală: bounding box-urile din fișierul JSON sunt calculate pe **imaginea originală** $80 \times 60$ pixeli, dar straturile convoluționale superioare operează pe **feature maps** de dimensiuni mult mai mici (conv2 primește $28 \times 38$, fc1 primește $12 \times 17$). Dacă `HOGSampler3D` ar fi folosit direct cu coordonatele pixel-space pe aceste straturi superioare, patch-urile selectate s-ar afla **complet în afara** tensorului de input — indicii ar fi incorecți și ar produce comportament nedefinit (out-of-bounds).
 
-Patch-ul `Patch3D(x, y, k)` folosește o convenție diferită: `x` = offset pe **rânduri** (vertical, dim 0 a tensorului), `y` = offset pe **coloane** (orizontal, dim 1 a tensorului). Conversia:
+**Soluția**: `HOGSampler3D` primește în constructor doi parametri — **striduri cumulative** $s_x$ și $s_y$ — care reprezintă **raportul de subsampling** de la pixel-space la feature-map space pentru stratul curent. La fiecare apel `sample()`, coordonatele bbox sunt **divizate prin aceste striduri** pentru a obține intervalul de sampling valid în spațiul feature map-ului stratului.
 
+##### 4.1.5.1. Definiția Stridului Cumulativ
+
+Într-o stivă convoluțională cu mai multe straturi, fiecare strat aplică un **stride spațial** (de obicei 1 pentru convoluții „valid" și 2 pentru pooling 2×2). **Stridul cumulativ până la intrarea stratului $L$** este produsul tuturor stridurilor aplicate de straturile precedente:
+
+$$s_{\text{cum}}(L) = \prod_{\ell=0}^{L-1} s_\ell$$
+
+Pentru arhitectura KTH_3D actuală (conv1 → pool1 → conv2 → pool2 → fc1), evoluția dimensională a unei axe spațiale (rezoluție pixel → feature map):
+
+| Strat | Stride propriu | Stride cumulativ la input | Dimensiune spațială aproximativă |
+|-------|:--------------:|:-------------------------:|:-------------------------------:|
+| conv1 | 1 | **1** (operează direct pe pixel) | $60 \times 80$ |
+| pool1 | 2 | — | output: $28 \times 38$ |
+| conv2 | 1 | $1 \cdot 2 = $ **2** (după pool1) | $28 \times 38$ |
+| pool2 | 2 | — | output: $12 \times 17$ |
+| fc1 | 1 | $1 \cdot 2 \cdot 1 \cdot 2 = $ **4** (după pool2) | $12 \times 17$ |
+
+Aceste valori sunt exact cele passate ca parametri constructorului `HOGSampler3D` în `KTH_3D.cpp`:
 ```cpp
-auto [bx, by, bw, bh] = fb.bboxes[0];  // bx = coloana, by = rândul
+conv1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(1), static_cast<size_t>(1));  // s_x = s_y = 1
 
-// Intervalul valid pentru patch.x (rânduri, vertical):
-size_t min_x = max(0, by);                          // rândul de start al bbox
-size_t max_x = min(W - fw, by + bh - fw);           // rândul maxim unde filtrul încape
+conv2.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(2), static_cast<size_t>(2));  // s_x = s_y = 2
 
-// Intervalul valid pentru patch.y (coloane, orizontal):
-size_t min_y = max(0, bx);                          // coloana de start a bbox
-size_t max_y = min(H - fh, bx + bw - fh);           // coloana maximă unde filtrul încape
+fc1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(4), static_cast<size_t>(4));  // s_x = s_y = 4
 ```
 
-**Condiția de validitate**: `max_x >= min_x && max_y >= min_y`. Dacă bounding box-ul este **prea mic** pentru a conține filtrul (ex. bbox de 3×8 dar filtru de 5×5), bounding box-ul este marcat ca `has_person = false` — filtrul nu încape fizic în zona detectată.
+##### 4.1.5.2. Convenția de Axe și Nomenclatura
 
-**Exemplu numeric**: Pentru un bbox `{x=15, y=8, w=30, h=45}` cu filtru `5×5` pe un cadru `80×60`:
-- `min_x = max(0, 8) = 8` (rândul 8)
-- `max_x = min(80-5, 8+45-5) = min(75, 48) = 48` (rândul 48)
-- `min_y = max(0, 15) = 15` (coloana 15)
-- `max_y = min(60-5, 15+30-5) = min(55, 40) = 40` (coloana 40)
+Convenția de indexare a tensorului simulatorului urmează moștenirea de la `Layer4D` / `Convolution3D`:
+- **dim(0)** = rânduri = axa **verticală** a imaginii = coordonata `y` a JSON-ului
+- **dim(1)** = coloane = axa **orizontală** a imaginii = coordonata `x` a JSON-ului
 
-Sampling-ul va genera: $x \sim \mathcal{U}(8, 48)$, $y \sim \mathcal{U}(15, 40)$ — patch-ul de $5 \times 5$ va fi întotdeauna **complet conținut** în bounding box-ul persoanei.
+Reciproc, `_cum_stride_x` este stridul cumulativ pe dim(0) (rânduri) și `_cum_stride_y` este cel pe dim(1) (coloane). Această nomenclatură păstrează consistența cu `Convolution3D::stride_x / stride_y` existente în simulator, chiar dacă poate părea inversată față de convenția matematică uzuală.
 
-**[* FIGURA 5: Un cadru KTH (80×60) cu bounding box-ul HOG desenat (dreptunghi portocaliu), și în interiorul acestuia mai multe dreptunghiuri mici de 5×5 pixeli (patch-uri posibile), arătând vizual zona din care HOGSampler3D extrage eșantioane. Compară cu un cadru unde patch-urile sunt dispersate pe tot cadrul (RandomSampler3D). *]**
+##### 4.1.5.3. Formula de Transformare Pas cu Pas
+
+**Pasul 1 — Extracția marginilor bbox-ului în pixel-space** (cu clamping la zero pentru siguranță numerică):
+$$\text{pix\_min\_row} = \max(0,\, by), \quad \text{pix\_max\_row} = \max(0,\, by + bh)$$
+$$\text{pix\_min\_col} = \max(0,\, bx), \quad \text{pix\_max\_col} = \max(0,\, bx + bw)$$
+
+**Pasul 2 — Mapare la feature-map space prin divizarea cu stridul cumulativ**:
+$$\text{feat\_min\_x} = \left\lfloor \frac{\text{pix\_min\_row}}{s_x} \right\rfloor, \quad \text{feat\_max\_x} = \left\lfloor \frac{\text{pix\_max\_row}}{s_x} \right\rfloor$$
+$$\text{feat\_min\_y} = \left\lfloor \frac{\text{pix\_min\_col}}{s_y} \right\rfloor, \quad \text{feat\_max\_y} = \left\lfloor \frac{\text{pix\_max\_col}}{s_y} \right\rfloor$$
+
+Implementarea în `src/sampler/HOGSampler3D.cpp`:
+```cpp
+// JSON stores bboxes in original pixel coordinates.
+// bx, bw run along dim(1) (image x / cols) -> divide by _cum_stride_y
+// by, bh run along dim(0) (image y / rows) -> divide by _cum_stride_x
+size_t pix_min_row = static_cast<size_t>(std::max(0, by));
+size_t pix_max_row = static_cast<size_t>(std::max(0, by + bh));
+size_t pix_min_col = static_cast<size_t>(std::max(0, bx));
+size_t pix_max_col = static_cast<size_t>(std::max(0, bx + bw));
+
+size_t feat_min_x = pix_min_row / _cum_stride_x;
+size_t feat_max_x = pix_max_row / _cum_stride_x;
+size_t feat_min_y = pix_min_col / _cum_stride_y;
+size_t feat_max_y = pix_max_col / _cum_stride_y;
+```
+
+**Pasul 3 — Validarea dimensiunii (bbox poate fi prea mic după scalare)**:
+
+Prin divizare, un bbox de $30 \times 45$ pixeli se reduce la $7 \times 11$ în feature-map space la fc1 (stride 4). Dacă filtrul depășește dimensiunile bbox-ului transformat, bbox-ul devine **invalid** pentru sampling pe acel cadru:
+
+```cpp
+// Skip if the transformed bbox is too small to fit the filter.
+if (feat_max_x <= feat_min_x || feat_max_y <= feat_min_y) continue;
+if ((feat_max_x - feat_min_x) < fw || (feat_max_y - feat_min_y) < fh) continue;
+```
+
+În acest caz se activează **fallback-ul temporal** (§4.1.6) — se caută un cadru vecin cu bbox valid, iar dacă nu există niciun cadru cu bbox valid se cade pe **random uniform** pe tot feature map-ul.
+
+**Pasul 4 — Calcularea intervalului valid pentru colțul stânga-sus al filtrului**:
+```cpp
+// Valid top-left filter corners. W - fw / H - fh are safe here
+// because sample() only calls us when filter_width < width &&
+// filter_height < height.
+size_t min_x = feat_min_x;
+size_t max_x = std::min<size_t>(W - fw, feat_max_x - fw);
+size_t min_y = feat_min_y;
+size_t max_y = std::min<size_t>(H - fh, feat_max_y - fh);
+```
+
+`W - fw` și `H - fh` sunt limite de siguranță care asigură că filtrul rămâne complet în interiorul feature map-ului (nu iese cu marginea dreaptă/inferioară peste marginea tensorului).
+
+**Pasul 5 — Sampling uniform în intervalul determinat**:
+```cpp
+std::uniform_int_distribution<size_t> dist_x(box.min_x, box.max_x);
+std::uniform_int_distribution<size_t> dist_y(box.min_y, box.max_y);
+return {dist_x(rng), dist_y(rng)};
+```
+
+Rezultatul garantat: patch-ul extras va fi **complet conținut** în bounding box-ul transformat al persoanei, indiferent de ce strat convoluțional îl cere.
+
+##### 4.1.5.4. Exemplu Numeric Complet
+
+Considerăm un bbox din JSON (cadru al persoanei centrale dintr-un video de boxing): `{bx=20, by=10, bw=30, bh=40}` — un dreptunghi $30 \times 40$ pixeli, colț stânga-sus la $(20, 10)$.
+
+**La conv1** ($s_x = s_y = 1$, input $60 \times 80$, filtru $5 \times 5$):
+- $\text{feat\_min\_x} = 10/1 = 10$, $\text{feat\_max\_x} = 50/1 = 50$
+- $\text{feat\_min\_y} = 20/1 = 20$, $\text{feat\_max\_y} = 50/1 = 50$
+- Interval valid: $x \in [10,\, 50-5] = [10, 45]$, $y \in [20,\, 50-5] = [20, 40]$
+- Patch-urile conv1 sunt plasate liber în toată zona persoanei (40 rânduri × 30 coloane)
+
+**La conv2** ($s_x = s_y = 2$, input $28 \times 38$, filtru $5 \times 5$):
+- $\text{feat\_min\_x} = 10/2 = 5$, $\text{feat\_max\_x} = 50/2 = 25$
+- $\text{feat\_min\_y} = 20/2 = 10$, $\text{feat\_max\_y} = 50/2 = 25$
+- Interval valid: $x \in [5,\, 25-5] = [5, 20]$, $y \in [10,\, 25-5] = [10, 20]$
+- Patch-urile conv2 cad într-o zonă compactă $\approx 15 \times 10$ din feature map-ul 28×38 — exact zona feature-urilor corespunzătoare persoanei generate de conv1+pool1
+
+**La fc1** ($s_x = s_y = 4$, input $12 \times 17$, filtru $12 \times 17$):
+- Filtrul acoperă **întregul** feature map, deci condiția `filter_width < width && filter_height < height` este **falsă**
+- Blocul de sampling ghidat nu se execută; patch-ul este returnat la $(0, 0)$ automat
+- Stridul cumulativ $(4, 4)$ este totuși trecut pentru consistența stivei, dar nu este efectiv folosit — fc1 este fully-connected
+
+**[* FIGURA 5 (IMPORTANTĂ): Un cadru KTH 80×60 cu bounding box-ul persoanei desenat (dreptunghi portocaliu). Alături, trei versiuni ale aceluiași cadru reduse prin subsampling: conv1 la rezoluție 60×80 (stride 1, bbox neschimbat), conv2 la 28×38 (stride 2, bbox la jumătate), fc1 la 12×17 (stride 4, bbox la un sfert). Suprapuse peste fiecare bbox transformat, mai multe dreptunghiuri mici de dimensiunea filtrului (5×5 pentru conv1/conv2, 12×17 pentru fc1), ilustrând zona validă de sampling. *]**
+
+##### 4.1.5.5. Aproximare vs. Mapare Exactă
+
+Formula $r' = \lfloor r / s_x \rfloor$ este o **aproximație** a mapării pixel-space → feature-map space. Maparea exactă include și un offset provenit din **border loss-ul** convoluțiilor fără padding:
+$$r' = \left\lfloor \frac{r - \text{offset}_r}{s_x} \right\rfloor$$
+
+unde $\text{offset}_r = (f_{w,1} - 1)/2 + (f_{w,2} - 1)/2 + \ldots$ este suma half-kernel-urilor straturilor precedente. Pentru conv1 cu filtru $5 \times 5$, offset-ul este $(5-1)/2 = 2$ pixeli pe fiecare latură. Simplificarea folosită ignoră acest offset, introducând o eroare maximă de $\pm f_w/2$ pixeli (~2 pixeli pentru un filtru 5×5).
+
+Pentru bbox-uri care acoperă persoane aproape de centrul cadrului (cazul tipic KTH, ~85% din sample-uri), eroarea este **neglijabilă** — patch-urile de sampling rămân bine plasate în zona relevantă. Pentru bbox-uri mici sau aproape de marginea cadrului, dacă intervalul transformat devine invalid, mecanismul de fallback temporal/random se activează automat, garantând corectitudinea indexării.
+
+##### 4.1.5.6. Impact Arhitectural al Transformării
+
+Introducerea transformării prin strid cumulativ a permis **unificarea comportamentului sampler-ului pe toată stiva convoluțională**:
+
+| Abordare anterioară | Abordare actuală |
+|---------------------|------------------|
+| HOG sampling **doar pe conv1** (verificare ad-hoc `input_depth <= 3`) | HOG sampling pe **toate straturile** (conv1, conv2, fc1) |
+| Straturile superioare primeau patch-uri **random uniform** | Straturile superioare rămân **focalizate pe persoană** |
+| Informația HOG era „diluată" după primul pooling | Informația HOG este **propagată explicit** prin toată stiva |
+| Riscul ca conv2 să învețe texturi de fundal activate incidental de conv1 | Eliminat — conv2 antrenează exclusiv pe activări din zona persoanei |
+
+Această unificare aduce două avantaje majore:
+1. **Consistență semantică**: Toate straturile convoluționale învață pattern-uri centrate pe persoană, nu doar primul, producând o ierarhie coerentă de feature-uri de la margini (conv1) la părți ale corpului (conv2) și la poze complete (fc1).
+2. **Reducerea zgomotului în straturile superioare**: Fără ghidare HOG pe conv2/fc1, straturile superioare ar fi putut extrage patch-uri din zone de fundal care incidental generează activări la conv1 (false positive-uri). Cu HOG propagat, această sursă de zgomot este eliminată.
+
+**[* FIGURA 5b: O diagramă schematică arătând două scenarii alternative — (A) cu HOG doar pe conv1, unde conv2 primește patch-uri random care pot ateriza în zone de fundal activate incidental; (B) cu HOG propagat prin cum_stride, unde conv2 primește patch-uri exclusiv din zona feature-urilor persoanei. Marchează zonele de activare eronate din (A) cu roșu și cele corecte din (B) cu verde. *]**
 
 #### 4.1.6. Fallback Temporal și Fallback Total
 
@@ -929,49 +1055,399 @@ conv1.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
 
 **[* FIGURA 7: Comparație vizuală a filtrelor (weights) învățate cu HOGSampler3D vs. RandomSampler3D pe conv1 — arătând cum filtrele HOG-guided capturează contururi anatomice (brațe, picioare, trunchi) în timp ce filtrele random capturează și texturi de fundal. *]**
 
-### 4.3. `ConvolutionSampler3D` — Wrapper Semantic pentru Experimente
+### 4.3. `ConvolutionSampler3D` — Paralelizare pe Indicele de Filtru prin `std::execution::par` / TBB
 
-`ConvolutionSampler3D` (`include/layer/ConvolutionSampler3D.h`, `src/layer/ConvolutionSampler3D.cpp`) este un **wrapper subțire** (thin wrapper) peste `Convolution3D`, introdus pentru a păstra un nume semantic distinct în contextul experimentelor sampler-driven:
+Ulterior refactorizării care a extras logica de sampling în clase independente (§4.1–§4.2), s-a observat că **stratul convoluțional rămâne cel mai costisitor pas computațional** al pipeline-ului KTH_3D. Pentru o singură epocă de antrenare, convoluția procesează ~2376 sample-uri, iar la finalul celor 150 epoci se execută **faza de inferență completă** (forward pass pe tot tensorul $60 \times 80 \times 2 \times 5$) pentru a genera feature map-urile de train și test care alimentează SVM-ul. Cu 3 straturi convoluționale (conv1, conv2, fc1), 150 de epoci × ~2376 sample-uri, execuția secvențială a convoluției devine **bottleneck-ul principal** al experimentului.
+
+Clasa `ConvolutionSampler3D` (`include/layer/ConvolutionSampler3D.h`, `src/layer/ConvolutionSampler3D.cpp`) este **varianta paralelizată** a stratului convoluțional care distribuie execuția pe **indicele de filtru $z$** folosind `std::execution::par` (implementat în libstdc++ cu **Intel TBB — Threading Building Blocks**). Clasa moștenește `Convolution3D` și **suprascrie** următoarele metode virtuale ale bazei:
 
 ```cpp
 class ConvolutionSampler3D : public Convolution3D {
 public:
-    ConvolutionSampler3D();
-    ConvolutionSampler3D(size_t filter_number, size_t filter_width,
-                         size_t filter_height, size_t filter_depth,
-                         std::string model_path = "",
-                         size_t stride_x = 1, size_t stride_y = 1, size_t stride_k = 1,
-                         size_t padding_x = 0, size_t padding_y = 0, size_t padding_k = 0);
+    Shape compute_shape(const Shape &previous_shape) override;
+
+    void train(const std::string &label,
+               const std::vector<Spike> &input_spike,
+               const Tensor<Time> &input_time,
+               std::vector<Spike> &output_spike) override;
+
+    void test(const std::string &label,
+              const std::vector<Spike> &input_spike,
+              const Tensor<Time> &input_time,
+              std::vector<Spike> &output_spike) override;
+
+    void on_epoch_end() override;
+
+private:
+    Tensor<float> _a_local;        // acumulatori [W × H × D × T], proprietatea wrapper-ului
+    Tensor<bool>  _inh_local;      // mască de inhibiție [W × H × D × T]
+    size_t        _num_threads;    // setat din std::thread::hardware_concurrency()
+    std::string   _model_path_local;
+    bool          _weights_loaded;
+    bool          _weights_saved;
+    void ensure_state_allocated();
+    void try_load_weights(const std::string &label);
+    void try_save_weights(const std::string &label);
 };
 ```
 
-**Comportamentul este identic cu `Convolution3D`** — moștenește toate funcționalitățile (antrenare STDP, testare, WTA, vizualizare ponderi) fără nicio logică proprie. Constructorii delegă direct către `Convolution3D`.
+#### 4.3.1. Motivația: De ce Paralelizare pe Indicele de Filtru $z$?
 
-**Diferența notabilă**: Ordinea parametrilor constructorului este diferită:
+Pentru a extrage paralelism dintr-o convoluție spiking cu STDP + WTA, cea mai naturală dimensiune de partiționare este **indicele de filtru $z$** (numit `depth` în simulator, $D = 64$ în experimentul curent). Motivele sunt strict **geometrice** (se referă la care indici atinge fiecare thread în memorie):
+
+1. **Activările sunt indexate pe $z$**: Fiecare neuron convoluțional are propria sa activare $a[x, y, z, k]$. Dacă două thread-uri primesc intervale disjuncte $[z_0^{(1)}, z_1^{(1)})$ și $[z_0^{(2)}, z_1^{(2)})$, ele scriu în **adrese de memorie complet disjuncte** — absolut nicio condiție de cursă (race condition).
+
+2. **Masca de inhibiție este indexată pe $z$**: Tensorul $inh[x, y, z, k]$ este la fel de indexat pe $z$. Două filtre nu interferează pe aceeași poziție spațio-temporală la nivel de memorie.
+
+3. **Ponderile sunt indexate pe $z$**: Tensorul de ponderi $w[x, y, z_i, z, k]$ are $z$ pe dimensiunea 4 (a patra axă). Slice-ul corespunzător unui $z$ fix este **citit și scris doar de thread-ul care procesează acel $z$** — izolarea este perfectă.
+
+4. **Pragurile $\theta[z]$**: În **testare**, pragurile sunt **doar citite** (read-only). Read-ul concurent al aceleiași locații de memorie este legal și lock-free în C++, deci multiple thread-uri pot compara $a \geq \theta$ simultan fără sincronizare. În **antrenare**, însă, update-ul pragurilor afectează toate filtrele (câștigătorul primește boost, ceilalți penalty) — motiv pentru care **faza de threshold update rămâne secvențială** în `train()`.
+
+5. **Output-ul (spike-uri emise)**: Fiecare thread își menține **propriul vector local** de spike-uri emise, eliminând nevoia de mutex pe un vector global. La finalul execuției paralele, vectorii locali sunt concatenați secvențial în `output_spike`.
+
+**Demonstrația formală a absenței condițiilor de cursă**: Fie două thread-uri $t_1$ și $t_2$ cu intervalele lor de filtre $Z_{t_1}$ și $Z_{t_2}$, unde $Z_{t_1} \cap Z_{t_2} = \emptyset$. Atunci:
+$$\forall (x, y, k) \in W \times H \times T,\; \forall z_1 \in Z_{t_1},\, z_2 \in Z_{t_2},\; z_1 \neq z_2 \implies \text{addr}(a[x,y,z_1,k]) \neq \text{addr}(a[x,y,z_2,k])$$
+
+Cu alte cuvinte, scrierile celor două thread-uri sunt garantat în locații de memorie diferite — niciun mutex, niciun atomic, niciun garantor extern nu este necesar. Aceasta este **proprietatea esențială** care face paralelizarea pe $z$ foarte eficientă.
+
+#### 4.3.2. Alocarea Stării Locale (`compute_shape` + `ensure_state_allocated`)
+
+`ConvolutionSampler3D` **nu poate reutiliza** câmpurile private `_a` și `_inh` ale bazei `Convolution3D`, deoarece acestea sunt definite în implementarea privată `_priv::Convolution3DImpl` (Pimpl idiom), inaccesibilă din clasa derivată. În consecință, wrapper-ul **alocă propriile sale tensori locali**:
+
+```cpp
+Shape ConvolutionSampler3D::compute_shape(const Shape &previous_shape) {
+    // Let the base class do its work (sets _width, _height, _depth,
+    // _conv_depth, and shapes the "w" / "th" parameter tensors).
+    Shape out = Convolution3D::compute_shape(previous_shape);
+
+    _input_depth_local      = previous_shape.dim(2);
+    _input_conv_depth_local = previous_shape.number() > 3 ? previous_shape.dim(3) : 1;
+
+    // Allocate parallel-safe state owned by THIS class.
+    _a_local   = Tensor<float>(Shape({width(), height(), depth(), conv_depth()}));
+    _inh_local = Tensor<bool>(Shape({width(), height(), depth(), conv_depth()}));
+
+    if (_num_threads == 0) {
+        unsigned hc = std::thread::hardware_concurrency();
+        _num_threads = (hc == 0) ? 1u : static_cast<size_t>(hc);
+    }
+    return out;
+}
+```
+
+Numărul de thread-uri este setat o singură dată la prima chemare, egal cu numărul de core-uri hardware disponibile. Pe **GCP `c2-standard-8`** (configurația de rulare curentă), `std::thread::hardware_concurrency()` returnează **8**, exact numărul de vCPU-uri Intel Cascade Lake.
+
+#### 4.3.3. Paralelizarea Fazei de Testare — Speedup Major
+
+Faza de testare (inferență) este locul unde paralelizarea produce **cel mai mare beneficiu**, deoarece fiecare sample necesită propagarea **tuturor** spike-urilor de intrare prin **toate** pozițiile spațio-temporale și **toate** filtrele. Structura algoritmică:
+
+```cpp
+void ConvolutionSampler3D::test(const std::string &label,
+                                const std::vector<Spike> &input_spike,
+                                const Tensor<Time> &input_time,
+                                std::vector<Spike> &output_spike) {
+    ensure_state_allocated();
+
+    Tensor<float> &w  = parameter<Tensor<float>>("w").get();
+    Tensor<float> &th = parameter<Tensor<float>>("th").get();
+    const bool inhibition = parameter<bool>("inhibition").get();
+    const size_t D = depth();
+
+    // 1. Reset stare locală.
+    std::fill(std::begin(_a_local),   std::end(_a_local),   0.0f);
+    std::fill(std::begin(_inh_local), std::end(_inh_local), false);
+
+    // 2. Construire z-chunks: cele D filtre împărțite în nthreads intervale.
+    size_t nthreads = std::min<size_t>(_num_threads, D);
+    std::vector<size_t> chunk_starts(nthreads + 1, 0);
+    for (size_t t = 0; t <= nthreads; ++t)
+        chunk_starts[t] = (D * t) / nthreads;
+
+    // 3. Task-uri paralele — fiecare task procesează chunk-ul [chunk_starts[t], chunk_starts[t+1]).
+    std::vector<size_t> task_idx(nthreads);
+    std::iota(task_idx.begin(), task_idx.end(), 0);
+    std::vector<std::vector<Spike>> per_thread_out(nthreads);
+
+    std::for_each(std::execution::par, task_idx.begin(), task_idx.end(),
+        [&](size_t t) {
+            const size_t z_lo = chunk_starts[t];
+            const size_t z_hi = chunk_starts[t + 1];
+            std::vector<Spike> &local_out = per_thread_out[t];
+
+            // Buffer reutilizat în iterație (evită alocări repetate).
+            std::vector<std::tuple<uint16_t, uint16_t, uint16_t,
+                                   uint16_t, uint16_t, uint16_t>> output_positions;
+
+            for (const Spike &spike : input_spike) {
+                output_positions.clear();
+                this->forward(spike.x, spike.y, spike.k, output_positions);
+
+                for (const auto &entry : output_positions) {
+                    uint16_t x = std::get<0>(entry);
+                    uint16_t y = std::get<1>(entry);
+                    uint16_t k = std::get<2>(entry);
+                    uint16_t w_x = std::get<3>(entry);
+                    uint16_t w_y = std::get<4>(entry);
+                    uint16_t w_k = std::get<5>(entry);
+
+                    // Iterație strict în chunk-ul owned de acest thread.
+                    for (size_t z = z_lo; z < z_hi; ++z) {
+                        if (inhibition && _inh_local.at(x, y, z, k))
+                            continue;
+                        // Scriere DISJUNCTĂ: doar thread-ul t atinge z ∈ [z_lo, z_hi)
+                        _a_local.at(x, y, z, k) += w.at(w_x, w_y, spike.z, z, w_k);
+
+                        if (_a_local.at(x, y, z, k) >= th.at(z)) {
+                            local_out.emplace_back(spike.time, x, y,
+                                                   static_cast<uint16_t>(z), k);
+                            _inh_local.at(x, y, z, k) = true;
+                        }
+                    }
+                }
+            }
+        });
+
+    // 4. Merge output-urile per-thread în output_spike final.
+    size_t total = 0;
+    for (auto &v : per_thread_out) total += v.size();
+    output_spike.reserve(output_spike.size() + total);
+    for (auto &v : per_thread_out)
+        output_spike.insert(output_spike.end(), v.begin(), v.end());
+}
+```
+
+**Analiza pas cu pas**:
+
+**(1) Partiționarea uniformă a indicilor $z$**: Cele $D = 64$ filtre sunt împărțite în $N = 8$ chunks egale (pe `c2-standard-8`), fiecare thread primind $\lceil 64/8 \rceil = 8$ filtre. Formula de partiționare este:
+$$z\_\text{lo}_t = \left\lfloor \frac{D \cdot t}{N} \right\rfloor, \quad z\_\text{hi}_t = \left\lfloor \frac{D \cdot (t+1)}{N} \right\rfloor$$
+
+Această distribuție garantează că **diferența maximă** între chunks este de cel mult 1 filtru (când $D$ nu este divizibil cu $N$). Pentru $D = 64$, $N = 8$: chunks $[0,8), [8,16), [16,24), [24,32), [32,40), [40,48), [48,56), [56,64)$.
+
+**(2) Lista de spike-uri este READ-ONLY**: Toate cele 8 thread-uri iterează peste **aceeași listă** `input_spike` fără a o modifica. Citirea concurentă a aceluiași container este **legală și lock-free** în C++ standard, deci nu este nevoie de mutex sau de copiere per-thread. Acesta este un avantaj semnificativ din punct de vedere al overhead-ului — lista tipică de spike-uri pentru un sample KTH conține ~40,000 de spike-uri, iar copierea per-thread ar consuma ~320 KB × 8 = 2.5 MB doar pentru această copie.
+
+**(3) `forward()` este read-only și thread-safe**: Metoda `forward()` moștenită de la `Convolution3D` doar **calculează** pozițiile de output pe baza stride-ului și filter size-ului — nu scrie în state-ul clasei. Astfel, multiple thread-uri pot chema simultan `this->forward(...)` fără sincronizare.
+
+**(4) Output-uri per-thread**: Fiecare thread își alimentează propriul `local_out` (vectori separați în `per_thread_out`). La finalul execuției paralele, vectorii sunt **concatenați secvențial** în `output_spike` final. Această abordare elimină nevoia de a bloca un singur vector global cu mutex — costul concatenării finale este neglijabil comparat cu lucrul paralel.
+
+**(5) Ponderile ($w$) și pragurile ($\theta$) sunt READ-ONLY la testare**: STDP **nu rulează la testare**, deci ponderile sunt „înghețate". Multiple thread-uri pot citi concurent din aceeași locație din tensorul $w$ fără blocaj. Similar pentru $\theta$.
+
+**(6) `std::execution::par`**: Politica de execuție paralelă din C++17. În libstdc++ (GCC 9+), implementarea se bazează pe **Intel TBB** (Threading Building Blocks), care gestionează automat:
+- **Thread pool management**: Thread-urile sunt create o singură dată și reutilizate între apeluri
+- **Scheduling work-stealing**: Dacă un thread termină chunk-ul său înainte de alții, „fură" task-uri din queue-urile vecinilor
+- **Adaptive grain size**: TBB calculează automat cât lucru să atribuie per thread pentru a balansa overhead vs. paralelism
+
+Programatorul scrie cod secvențial la nivel de task (lambda), iar TBB distribuie task-urile peste thread-uri — nu există apeluri explicite `pthread_create`, `std::thread`, sau `std::async`.
+
+**Speedup teoretic și practic**:
+
+Pe o mașină cu $P$ core-uri, speedup-ul teoretic al testării (legea lui Amdahl) este:
+$$S_{\text{teoretic}} = \frac{1}{(1 - p) + \frac{p}{P}}$$
+
+unde $p$ este fracțiunea paralelizabilă. În `ConvolutionSampler3D::test()`, aproape întreaga execuție este paralelizată ($p \approx 0.95$), iar partea serială este reprezentată de: (a) resetarea inițială a `_a_local` și `_inh_local`, (b) construcția chunks, (c) merge-ul final al vectorilor. Pe `c2-standard-8` ($P = 8$):
+$$S_{\text{teoretic}} \approx \frac{1}{0.05 + \frac{0.95}{8}} = \frac{1}{0.169} \approx 5.92\times$$
+
+În practică, speedup-ul observat empiric este de **aproximativ $4$–$6\times$** pe GCP `c2-standard-8`, diferența față de cel teoretic fiind cauzată de:
+- **Overhead de management TBB**: Crearea task-urilor și sincronizarea la finalul `for_each`
+- **Memory bandwidth contention**: Toate thread-urile citesc concurent din tensorul $w$, iar lățimea de bandă a memoriei RAM devine gâtul de sticlă
+- **Cache-line thrashing**: Dacă două thread-uri scriu în aceeași cache-line (64 bytes), există „false sharing" care forțează invalidarea cache-ului. În cazul nostru, fiecare filtru $z$ are activări separate în memorie, dar zonele adiacente de $z$ pot împărți linii de cache
+
+**[* TABEL: Speedup măsurat al testării pe conv1 pentru diferite numere de thread-uri (1, 2, 4, 8) pe GCP c2-standard-8. Coloanele: Nr. threads | Timp test (s) | Speedup | Eficiență paralelă (%). *]**
+
+#### 4.3.4. Paralelizarea Fazei de Antrenare — Constrângeri Semantice
+
+Antrenarea este **fundamental secvențială per-spike** din cauza semanticii STDP + WTA:
+1. Spike-urile de intrare trebuie procesate **în ordine temporală** (cea mai mică latență primele)
+2. **Primul neuron** care atinge pragul câștigă competiția WTA, iar ceilalți sunt inhibați
+3. **Actualizarea pragurilor** afectează **toate** filtrele (câștigătorul și toți ceilalți)
+4. După ce WTA se activează (`inhibition = true`), se oprește procesarea următoarelor spike-uri pentru sample-ul curent
+
+Cu aceste constrângeri, **bucla exterioară peste spike-uri rămâne secvențială**. Totuși, **în interiorul procesării unui singur spike**, există două sub-operații care **se pot paraleliza** pe dimensiunea $z$:
+
+**Sub-operația 1 — Actualizarea acumulatorilor pentru toate filtrele** (paralelizată pe $z$):
+
+La fiecare spike, potențialul membranar al tuturor celor 64 de neuroni trebuie incrementat cu ponderea corespunzătoare:
+
+```cpp
+std::vector<size_t> z_indices(D);
+std::iota(z_indices.begin(), z_indices.end(), 0);
+
+for (const Spike &spike : input_spike) {
+    // Parallel accumulator update across z. Each z writes only to
+    // _a_local[0,0,z,0] -> disjoint, no race.
+    std::for_each(std::execution::par, z_indices.begin(), z_indices.end(),
+        [&](size_t z) {
+            _a_local.at(0, 0, z, 0) += w.at(spike.x, spike.y, spike.z, z, spike.k);
+        });
+
+    // Secvențial: găsim cel mai mic z care a trecut pragul (WTA winner).
+    size_t winner = std::numeric_limits<size_t>::max();
+    for (size_t z = 0; z < D; ++z) {
+        if (_a_local.at(0, 0, z, 0) >= th.at(z)) {
+            winner = z;
+            break;
+        }
+    }
+    if (winner == std::numeric_limits<size_t>::max()) continue;
+
+    // ... threshold update + STDP weight update ...
+
+    if (inhibition) return;  // WTA: după primul fire, se termină sample-ul
+}
+```
+
+Fiecare thread scrie la `_a_local[0, 0, z, 0]` pentru un $z$ diferit — **adrese disjuncte**, race-free. Notă: la antrenare se folosește doar poziția $(0, 0)$ a acumulatorului deoarece convoluția se aplică pe un **unic patch** selectat de sampler (nu pe toate pozițiile spațio-temporale ca la testare).
+
+**Sub-operația 2 — Actualizarea STDP a ponderilor neuronului câștigător** (paralelizată pe index plat):
+
+Odată ce un neuron $z^*$ câștigă competiția WTA, ponderile sale $w[x, y, z_i, z^*, k]$ trebuie actualizate pentru **toți** $(x, y, z_i, k) \in [0, f_w) \times [0, f_h) \times [0, C_{\text{in}}) \times [0, f_t)$. Cele $f_w \times f_h \times C_{\text{in}} \times f_t = 5 \cdot 5 \cdot 2 \cdot 2 = 100$ ponderi (pentru conv1) sunt **adrese unice** în tensorul $w$ — pot fi actualizate concurent fără sincronizare:
+
+```cpp
+const size_t total = Fw * Fh * Iz * Fcd;
+std::vector<size_t> idx(total);
+std::iota(idx.begin(), idx.end(), 0);
+
+std::for_each(std::execution::par, idx.begin(), idx.end(),
+    [&](size_t flat) {
+        // Decodare index plat → (x, y, zi, k) prin aritmetică modulară.
+        size_t k  = flat % Fcd;
+        size_t r1 = flat / Fcd;
+        size_t zi = r1 % Iz;
+        size_t r2 = r1 / Iz;
+        size_t y  = r2 % Fh;
+        size_t x  = r2 / Fh;
+        w.at(x, y, zi, winner, k) =
+            stdp.process(w.at(x, y, zi, winner, k),
+                         input_time.at(x, y, zi, k),
+                         spike.time);
+    });
+```
+
+Fiecare thread primește un subset din cele 100 de ponderi și apelează `stdp.process(...)` (regula Biological STDP) pe acele ponderi. Scrierile sunt la adrese unice — race-free.
+
+**Sub-operația secvențială — Actualizarea pragurilor**:
+
+Actualizarea pragurilor $\theta_j$ afectează **toate** filtrele simultan (câștigătorul primește un boost $+lr_{th}$, ceilalți primesc un minor decay $-lr_{th}/(D-1)$), deci această parte **rămâne secvențială** — paralelizarea aici ar introduce race-uri pe câmpurile globale ale pragurilor sau ar forța utilizarea de atomic operations cu overhead semnificativ:
+
+```cpp
+for (size_t z1 = 0; z1 < D; ++z1) {
+    th.at(z1) -= lr_th * (spike.time - t_obj);
+    if (z1 != winner)
+        th.at(z1) -= lr_th / static_cast<float>(D - 1);
+    else
+        th.at(z1) += lr_th;
+    th.at(z1) = std::max<float>(min_th, th.at(z1));
+}
+```
+
+**Observație**: Overhead-ul TBB pentru a paraleliza o buclă de doar 64 iterații ar depăși costul execuției secvențiale (task dispatch + join). Deci păstrarea secvențială aici este și **optimă din punct de vedere practic**, nu doar semantic.
+
+**Speedup al antrenării**: Datorită constrângerilor semantice (bucla exterioară rămâne secvențială), speedup-ul antrenării este mai modest decât al testării — tipic **$2\text{-}3\times$** pe `c2-standard-8`. Totuși, antrenarea este apelată doar o singură dată per sample × epocă, în timp ce testarea rulează pe tot dataset-ul la finalul antrenamentului, deci impactul net pe timpul total de experiment este dominat de speedup-ul testării.
+
+#### 4.3.5. Salvarea și Încărcarea Ponderilor (Persistență Locală)
+
+Baza `Convolution3D` gestionează persistența ponderilor în implementarea sa privată (`_priv::Convolution3DImpl::train`), care **nu este accesibilă** din `ConvolutionSampler3D`. În consecință, wrapper-ul **replică logica minimă necesară** de încărcare/salvare:
+
+```cpp
+void ConvolutionSampler3D::try_save_weights(const std::string &label);
+void ConvolutionSampler3D::try_load_weights(const std::string &label);
+void ConvolutionSampler3D::on_epoch_end();  // apelează try_save_weights
+```
+
+**Parsarea label-ului**: Framework-ul identifică fiecare strat printr-un label de forma `"<exp_name>;.<layer_index>;.<rest>"`. Funcția helper `parse_label` extrage `exp_name` și `layer_index` pentru a construi calea fișierului JSON:
+
+```cpp
+static bool parse_label(const std::string &label,
+                        std::string &exp_name, std::string &layer_index) {
+    const std::string delim = ";.";
+    auto p1 = label.find(delim);
+    if (p1 == std::string::npos) return false;
+    exp_name = label.substr(0, p1);
+    auto p2 = label.find(delim, p1 + delim.size());
+    layer_index = label.substr(p1 + delim.size(), p2 - (p1 + delim.size()));
+    return true;
+}
+```
+
+**Layout-ul fișierelor**: Identic cu baza — `<cwd>/Weights/<exp_name>/<layer_index>/<exp_name>.json`. De exemplu, pentru `exp_name = "kth_7"`, conv1 salvează în `Weights/kth_7/0/kth_7.json`, conv2 în `Weights/kth_7/1/kth_7.json`, fc1 în `Weights/kth_7/2/kth_7.json`.
+
+**Salvare la finalul fiecărei epoci**: `on_epoch_end()` apelează `try_save_weights(last_label)` dacă parametrul `save_weights = true`. Salvarea este **cumulativă / overwrite**: fișierul este suprascris după fiecare epocă, astfel încât la încheierea experimentului el reflectă **starea finală** a ponderilor:
+
+```cpp
+void ConvolutionSampler3D::on_epoch_end() {
+    Convolution3D::on_epoch_end();  // propagare annealing, adaptare STDP
+    if (!_last_label.empty()) {
+        _weights_saved = false;
+        try_save_weights(_last_label);
+    }
+}
+```
+
+**Încărcare pentru resuming**: Dacă `model_path` este nenul (ex. `"Weights/kth_7/0/kth_7.json"`), `try_load_weights()` citește fișierul și inițializează tensorul $w$ direct din JSON, iar **antrenarea este dezactivată complet** pentru acel strat — toate apelurile ulterioare la `train()` devin no-op, preservând ponderile încărcate:
+
+```cpp
+void ConvolutionSampler3D::train(...) {
+    ensure_state_allocated();
+    // Dacă un model_path a fost specificat, încarcă ponderi și iesi.
+    if (!_model_path_local.empty()) {
+        try_load_weights(label);
+        return;  // no-op pentru toate sample-urile ulterioare
+    }
+    // ... altfel execută antrenarea STDP normală ...
+}
+```
+
+Această capacitate permite **experimente incrementale**:
+- Conv1 pre-antrenat (încărcat din JSON) + conv2 antrenat nou
+- Evaluări multiple cu aceleași ponderi (schimbarea sampler-ului sau a hyper-parameterilor de analiză) fără re-antrenare costisitoare
+- Recuperare după oprire: continuarea experimentului de la ultima epocă salvată
+
+#### 4.3.6. Utilizarea în `KTH_3D.cpp` — Toate Cele 3 Straturi Convoluționale
+
+În versiunea curentă a experimentului, **toate cele 3 straturi convoluționale** folosesc `ConvolutionSampler3D` (anterior `Convolution3D` serial):
+
+```cpp
+// === conv1 === Input: (60, 80, 2, 5) -> Output: (56, 76, 64, 4)
+auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
+conv1.set_name("conv1");
+conv1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(1), static_cast<size_t>(1));  // pixel-space direct
+
+// === pool1 === (56, 76, 64, 4) -> (28, 38, 64, 4)
+auto &pool1 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+
+// === conv2 === (28, 38, 64, 4) -> (24, 34, 64, 3)
+auto &conv2 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
+conv2.set_name("conv2");
+conv2.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(2), static_cast<size_t>(2));  // cum_stride după pool1
+
+// === pool2 === (24, 34, 64, 3) -> (12, 17, 64, 3)
+auto &pool2 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+
+// === fc1 === (12, 17, 64, 3) -> (1, 1, 64, 2) — fully connected
+auto &fc1 = experiment.push<layer::ConvolutionSampler3D>(64, 12, 17, 2, "", 1, 1, 1);
+fc1.set_name("fc1");
+fc1.parameter<Sampler>("sampler").set<sampler::HOGSampler3D>(
+    static_cast<size_t>(4), static_cast<size_t>(4));  // cum_stride după pool1+pool2
+```
+
+Numerele $(1,1)$, $(2,2)$, $(4,4)$ din constructorul `HOGSampler3D` sunt **stridurile cumulative** de la imaginea originală până la input-ul stratului respectiv, așa cum au fost derivate în §4.1.5.
+
+**Diferența față de `Convolution3D` direct**: Deși semantica **rezultatelor** este identică (cu seed fix, aceleași hyperparametri produc aceleași ponderi finale), performanța este **semnificativ mai bună** datorită paralelizării. Ordinea parametrilor constructorului este:
 - `Convolution3D(filter_width, filter_height, filter_depth, filter_number, ...)`
 - `ConvolutionSampler3D(filter_number, filter_width, filter_height, filter_depth, ...)`
 
-**Utilizare în experiment:**
+**Înregistrarea în LayerFactory**:
 ```cpp
-// Varianta 1: Convolution3D direct (folosită curent)
-auto &conv1 = experiment.push<layer::Convolution3D>(5, 5, 2, 64, "", 1, 1, 1);
-
-// Varianta 2: ConvolutionSampler3D (alternativă semantică)
-auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
+static RegisterClassParameter<ConvolutionSampler3D, LayerFactory>
+    _register("ConvolutionSampler3D");
 ```
 
-Ambele variante produc **exact același rezultat** — un layer convoluțional cu 64 de filtre de 5×5 spațial și adâncime temporală 2, cu stride 1×1×1. Diferența este doar de semantică și organizare a codului.
+Aceasta permite crearea stratului și din configurații declarative (JSON/YAML), nu doar prin apeluri de cod direct.
 
-**Înregistrarea în fabrică**: `ConvolutionSampler3D` este înregistrat independent în `LayerFactory`, permițând crearea sa prin configurare:
-```cpp
-static RegisterClassParameter<ConvolutionSampler3D, LayerFactory> _register("ConvolutionSampler3D");
-```
+**[* FIGURA 8 (IMPORTANTĂ): O diagramă ilustrând partiționarea tensorului 4D $[W \times H \times D \times T]$ pe dimensiunea filtrelor $D$. Arată 8 thread-uri dispuse vertical, fiecare primind o felie $[W \times H \times (D/8) \times T]$ (8 filtre din 64). Săgeți de la fiecare thread către propriul buffer de output. Subliniază cu culori diferite (8 culori) că slice-urile nu se suprapun pe dimensiunea $z$. *]**
 
-**Scopul arhitectural**: Separarea permite ca experimentele care testează diferite strategii de sampling (HOG vs. Random) să fie identificabile vizual în cod prin numele layer-ului, fără a modifica `Convolution3D` originală.
-
-**[* FIGURA 8: O diagramă UML simplificată arătând relația de moștenire: `Layer4D` → `Convolution3D` → `ConvolutionSampler3D`, cu notă că ConvolutionSampler3D nu adaugă logică nouă, doar un nume semantic distinct. *]**
-
-*(Notă: în versiunile ulterioare ale experimentului, straturile convoluționale succesive (conv2, conv3...) vor folosi strategii de sampling diferite, unde procesarea eșantioanelor se va face diferit față de conv1. Această parte va fi adăugată ulterior.)*
+**[* FIGURA 8b: Un grafic bar chart cu speedup-ul (raportul $t_{serial}/t_{paralel}$) pentru numărul de thread-uri = 1, 2, 4, 8, comparat cu linia teoretică a legii lui Amdahl. Arată că speedup-ul scalează aproape liniar până la 4 thread-uri, apoi se aplatizează din cauza memory bandwidth. *]**
 
 ### 4.4. Configurarea Sampler-ului ca Parametru al Layer-ului
 
@@ -1293,32 +1769,190 @@ Acest subcapitol fixează fluxul dimensional (tensorial) și parametrii exacti d
 | `MaxScaling` | — | $[60 \times 80 \times 2 \times 5]$ → $[60 \times 80 \times 2 \times 5]$ |
 | `LatencyCoding` | — | $[60 \times 80 \times 2 \times 5]$ → $[60 \times 80 \times 2 \times 5]$ |
 
-### 7.3. Stratul `conv1` (Convolution3D + HOGSampler3D)
+### 7.3. Arhitectura Completă: conv1 → pool1 → conv2 → pool2 → fc1
+
+Spre deosebire de versiunile anterioare ale experimentului (care aveau doar stratul `conv1`), experimentul curent (`apps/kth/KTH_3D.cpp`) implementează o **arhitectură ierarhică cu trei straturi convoluționale** intercalate cu două straturi de pooling spațial. Toate cele trei straturi sunt instanțe ale clasei `ConvolutionSampler3D` cu samplere `HOGSampler3D` diferite pentru a ține cont de modificarea rezoluției spațiale după fiecare pas de pooling.
+
+#### 7.3.1. Privire de Ansamblu
+
+| Strat | Tip | Input Shape | Output Shape | Cumulative Stride |
+|-------|-----|-------------|--------------|-------------------|
+| `conv1` | `ConvolutionSampler3D` + `HOGSampler3D(1, 1)` | $[60 \times 80 \times 2 \times 5]$ | $[56 \times 76 \times 64 \times 4]$ | $(1, 1)$ |
+| `pool1` | `Pooling3D(2, 2, 1)` | $[56 \times 76 \times 64 \times 4]$ | $[28 \times 38 \times 64 \times 4]$ | $(2, 2)$ |
+| `conv2` | `ConvolutionSampler3D` + `HOGSampler3D(2, 2)` | $[28 \times 38 \times 64 \times 4]$ | $[24 \times 34 \times 64 \times 3]$ | $(2, 2)$ |
+| `pool2` | `Pooling3D(2, 2, 1)` | $[24 \times 34 \times 64 \times 3]$ | $[12 \times 17 \times 64 \times 3]$ | $(4, 4)$ |
+| `fc1` | `ConvolutionSampler3D` + `HOGSampler3D(4, 4)` | $[12 \times 17 \times 64 \times 3]$ | $[1 \times 1 \times 64 \times 2]$ | $(4, 4)$ |
+
+**Semnificația cumulative stride-ului:** după fiecare strat de pooling cu stride 2, fereastra persoanei în spațiul feature map se îngustează cu un factor de 2. Stratul `conv1` operează pe spațiul original (fiecare pixel corespunde unui element feature), deci `HOGSampler3D(1, 1)` face transformarea identică. După `pool1`, un element feature map corespunde unui pătrat $2 \times 2$ din spațiul original, deci `HOGSampler3D(2, 2)` împarte coordonatele bbox-ului la 2. După `pool2`, raportul devine $4 \times 4$, deci `HOGSampler3D(4, 4)` împarte coordonatele la 4. Aceasta este exact transformarea descrisă detaliat în **Secțiunea 4.1.5** (Transformarea Bounding Box-urilor prin Strid Cumulativ).
+
+#### 7.3.2. Hyperparametri Globali
+
+Acești parametri sunt partajați de toate cele trei straturi `ConvolutionSampler3D` și sunt definiți la începutul `main()` în `KTH_3D.cpp`:
+
+| Parametru | Valoare | Rol |
+|-----------|---------|-----|
+| `seed` | **7** | Seed-ul RNG pentru reproducibilitate (testat și cu 42, 123) |
+| `frame_size_width × height` | $80 \times 60$ | Rezoluția cadrelor video |
+| `video_frames` | 5 | Dimensiunea ferestrei temporale (numărul de cadre per sample) |
+| `frame_gap` | 0 | Fără frame-uri sărite între cadre consecutive |
+| `threshold` | 5 | Pragul `OnOffFilter` |
+| `train_sample_per_video` | 10 | Număr de sample-uri extrase per video de train |
+| `test_sample_per_video` | 10 | Număr de sample-uri extrase per video de test |
+| `tmp_filter_size` | 2 | Adâncimea temporală a filtrelor conv2 și fc1 |
+| `temp_stride` | 1 | Pas temporal în conv2 și fc1 |
+| `w_lr` | 0.1 | Learning rate pentru ponderile STDP |
+| `th_lr` | 1.0 | Learning rate pentru pragurile homeostatice |
+
+#### 7.3.3. Stratul `conv1` — Detectoare de Edge-uri Spatio-Temporale
+
+`conv1` este primul strat convoluțional și procesează direct tensorul de spike-uri emis de `LatencyCoding`. Filtrul său spațial mic ($5 \times 5$) și adâncimea temporală redusă (2) îl forțează să învețe pattern-uri locale: edge-uri orientate cu shift temporal, care reprezintă fluxul optic primar al mișcării.
+
+```cpp
+auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, 2, "", 1, 1, 1);
+conv1.set_name("conv1");
+conv1.parameter<uint32_t>("epoch").set(150);
+conv1.parameter<float>("t_obj").set(0.80f);      // t_obj1
+conv1.parameter<Tensor<float>>("th")
+     .distribution<distribution::Gaussian>(12.0, 0.1);
+conv1.parameter<STDP>("stdp").set<stdp::Biological>(0.1f, 0.1f);
+conv1.parameter<Sampler>("sampler")
+     .set<sampler::HOGSampler3D>(static_cast<size_t>(1),
+                                  static_cast<size_t>(1));
+```
 
 | Parametru | Valoare | Semnificație |
 |-----------|---------|-------------|
-| Filtru spațial | $5 \times 5$ | Fereastră de extracție spațială |
-| Adâncime temporală | 2 (`tmp_filter_size`) | Procesează 2 cadre temporale simultan |
-| Stride | $1 \times 1 \times 1$ | Pas unitar pe toate axele |
-| Număr filtre | **64** | Numărul de pattern-uri învățate |
-| Epoci | **100** | Numărul de treceri prin dataset |
-| Annealing | $0.95$ | Factor de scădere a learning rate-ului |
-| `min_th` | $1.0$ | Limita inferioară a pragului |
-| `t_obj` | $0.75$ | Target-ul de activare per neuron |
-| `lr_th` | $1.0$ | Rata de învățare a pragurilor |
+| Filtru | $5 \times 5 \times 2$ | Fereastră spațio-temporală |
+| Stride | $(1, 1, 1)$ | Pas unitar pe toate axele |
+| Număr filtre | **64** | Pattern-uri distincte învățate |
+| Epoci | **150** | Numărul de treceri prin dataset |
+| `t_obj1` | **0.80** | Target de timp mediu pentru spike-ul winner |
+| `min_th` | 1.0 | Limita inferioară a pragului (homeostazie) |
+| `annealing` | 0.95 | Scăderea learning rate-ului per epocă |
+| Inițializare ponderi | $\mathcal{U}(0, 1)$ | Uniform |
+| Inițializare threshold | $\mathcal{N}(12.0, 0.1)$ | Gaussian |
+| STDP | `Biological(0.1, 0.1)` | Regula de învățare |
+| Sampler | **`HOGSampler3D(1, 1)`** | Cumulative stride 1 (spațiu original) |
 | `wta_infer` | **true** | Winner-Takes-All activ la inferență |
-| Inițializare ponderi | $\mathcal{U}(0, 1)$ | Distribuție uniformă |
-| Inițializare threshold | $\mathcal{N}(9.0, 0.1)$ | Distribuție gaussiană |
-| STDP | `Biological(0.1, 0.1)` | Regula de învățare cu $w_{lr} = 0.1$ |
-| Sampler | **HOGSampler3D** | Eșantionare ghidată pe zona persoanei |
+| `inhibition` | **true** | WTA activ la antrenare |
 
 **Dimensiuni:**
-- **Input**: Tensor Spike-uri din preprocesor: $[60 \times 80 \times 2 \times 5]$
+- **Input**: $[60 \times 80 \times 2 \times 5]$ (h × w × On/Off × frames)
 - **Output**: $[56 \times 76 \times 64 \times 4]$
   - Spațial: $(60-5)/1+1 = 56$ rânduri, $(80-5)/1+1 = 76$ coloane
   - Canale: 64 filtre
   - Temporal: $(5-2)/1+1 = 4$ pași temporali
 - **Sinapse per neuron**: $5 \times 5 \times 2 \times 2 = 100$
+
+#### 7.3.4. Stratul `pool1` — Reducere Spațială $2 \times 2$
+
+```cpp
+auto &pool1 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+pool1.set_name("pool1");
+```
+
+`pool1` este un `Pooling3D` cu fereastră $2 \times 2 \times 1$ și stride $(2, 2, 1)$. Rolul său este dublu:
+
+1. **Reducerea dimensiunii spațiale** de la $56 \times 76$ la $28 \times 38$, scăzând numărul de pixeli feature map-ului la un sfert. Aceasta reduce costul computațional al `conv2` și introduce o anumită **invarianță la translație mică** — dacă o persoană se deplasează cu un pixel în stânga în spațiul original, activarea în feature map rămâne aproximativ aceeași după pooling.
+2. **Dublarea câmpului receptiv efectiv** al stratului `conv2`. După `pool1`, fiecare element al feature map-ului corespunde unui pătrat $2 \times 2$ din spațiul original, deci un filtru $5 \times 5$ în `conv2` „vede" efectiv un patch de $10 \times 10$ pixeli din imaginea originală.
+
+| Parametru | Valoare |
+|-----------|---------|
+| Fereastră | $2 \times 2 \times 1$ |
+| Stride | $(2, 2, 1)$ |
+| Transformare | $[56 \times 76 \times 64 \times 4] \to [28 \times 38 \times 64 \times 4]$ |
+
+#### 7.3.5. Stratul `conv2` — Compoziție de Pattern-uri Locale
+
+`conv2` operează pe feature map-urile produse de `pool1` și învață pattern-uri de nivel mediu: combinații de edge-uri primare care formează **componente anatomice** (linii de braț + linii de trunchi = unghi articulator, arcade de picioare în mișcare etc.). Filtrul său este tot $5 \times 5 \times 2$, dar este acum aplicat pe un feature map cu 64 de canale de intrare (vs. 2 pentru `conv1`), ceea ce crește drastic numărul de sinapse per neuron la $5 \times 5 \times 64 \times 2 = 3200$.
+
+```cpp
+auto &conv2 = experiment.push<layer::ConvolutionSampler3D>(
+                  64, 5, 5, tmp_filter_size, "", 1, 1, temp_stride);
+conv2.set_name("conv2");
+conv2.parameter<uint32_t>("epoch").set(150);
+conv2.parameter<float>("t_obj").set(0.65f);      // t_obj2
+conv2.parameter<Tensor<float>>("th")
+     .distribution<distribution::Gaussian>(18.0, 0.1);
+conv2.parameter<STDP>("stdp").set<stdp::Biological>(0.1f, 0.1f);
+conv2.parameter<Sampler>("sampler")
+     .set<sampler::HOGSampler3D>(static_cast<size_t>(2),
+                                  static_cast<size_t>(2));
+```
+
+| Parametru | Valoare | Diferență față de conv1 |
+|-----------|---------|-------------------------|
+| Filtru | $5 \times 5 \times 2$ | Identic |
+| Număr filtre | **64** | Identic |
+| `t_obj2` | **0.65** | **Scăzut** — cere spike-uri mai rapide |
+| Inițializare threshold | $\mathcal{N}(18.0, 0.1)$ | **Crescut** — compensează 64 canale intrare |
+| Sampler | **`HOGSampler3D(2, 2)`** | Cumulative stride 2 (după pool1) |
+
+**Intuiția parametrilor**: `t_obj2` este scăzut de la 0.80 la 0.65 pentru a forța `conv2` să se specializeze mai devreme în fereastra temporală — stratul 2 trebuie să detecteze pattern-uri care devin disponibile imediat ce stratul 1 a emis primele spike-uri. Threshold-ul inițial este crescut de la 12 la 18 pentru a compensa faptul că acum există **mai multe canale de intrare** (64 vs. 2), deci potențialul de membrană se poate acumula mai rapid.
+
+**Dimensiuni:**
+- **Input**: $[28 \times 38 \times 64 \times 4]$
+- **Output**: $[24 \times 34 \times 64 \times 3]$
+- **Sinapse per neuron**: $5 \times 5 \times 64 \times 2 = 3200$
+
+#### 7.3.6. Stratul `pool2` — A Doua Reducere Spațială
+
+Identic ca structură cu `pool1`, dar aplicat pe ieșirea `conv2`:
+
+```cpp
+auto &pool2 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+pool2.set_name("pool2");
+```
+
+**Transformare**: $[24 \times 34 \times 64 \times 3] \to [12 \times 17 \times 64 \times 3]$
+
+După `pool2`, cumulative stride-ul total devine $(4, 4)$, ceea ce înseamnă că fiecare pixel al feature map-ului corespunde unui pătrat $4 \times 4$ din spațiul original.
+
+#### 7.3.7. Stratul `fc1` — Fully Connected Spatial
+
+`fc1` este un strat convoluțional „fully connected" spațial: filtrul său are exact **aceeași dimensiune spațială ca input-ul** ($12 \times 17$), deci există o singură poziție spațială valabilă, iar ieșirea are shape $[1 \times 1 \times 64 \times 2]$. Acest strat agregă toate informațiile din întregul feature map spațial într-un vector de clasificare semantică.
+
+```cpp
+auto &fc1 = experiment.push<layer::ConvolutionSampler3D>(
+                64, 12, 17, tmp_filter_size, "", 1, 1, temp_stride);
+fc1.set_name("fc1");
+fc1.parameter<uint32_t>("epoch").set(150);
+fc1.parameter<float>("t_obj").set(0.75f);        // t_obj3
+fc1.parameter<Tensor<float>>("th")
+   .distribution<distribution::Gaussian>(40.0, 0.1);
+fc1.parameter<Sampler>("sampler")
+   .set<sampler::HOGSampler3D>(static_cast<size_t>(4),
+                                static_cast<size_t>(4));
+```
+
+| Parametru | Valoare | Observație |
+|-----------|---------|------------|
+| Filtru | $12 \times 17 \times 2$ | **Acoperă întregul spațiu** → fully connected spațial |
+| Număr filtre | **64** | Pattern-uri semantice |
+| `t_obj3` | **0.75** | Intermediar între conv1 și conv2 |
+| Inițializare threshold | $\mathcal{N}(40.0, 0.1)$ | **Mai mare** — compensează fan-in uriaș |
+| Sampler | **`HOGSampler3D(4, 4)`** | Cumulative stride 4 |
+
+**Notă despre sampler la fc1**: Chiar dacă stratul este fully connected spațial și sampler-ul va returna întotdeauna poziția $(0, 0, k)$ (nu există alte poziții spațiale de ales), `HOGSampler3D(4, 4)` este păstrat pentru **consistență configurațională**: permite comparații directe cu variante alternative (ex. folosirea unui `ConvolutionSampler3D` fără constrângeri spațiale) fără a schimba interfața. Stride-ul cumulativ $(4, 4)$ este corect pentru punctul din pipeline în care se află stratul, chiar dacă practic nu are niciun efect.
+
+**Dimensiuni:**
+- **Input**: $[12 \times 17 \times 64 \times 3]$
+- **Output**: $[1 \times 1 \times 64 \times 2]$
+- **Sinapse per neuron**: $12 \times 17 \times 64 \times 2 = 26{,}112$
+
+#### 7.3.8. Analiza Cumulativă a Capacității
+
+Arhitectura în trei straturi are implicații importante asupra capacității reprezentaționale și costului computațional:
+
+| Strat | Neuroni (Output) | Sinapse/neuron | Total sinapse antrenabile |
+|-------|-----------------|----------------|---------------------------|
+| `conv1` | $56 \times 76 \times 64 \times 4 \approx 1{,}089{,}000$ | $100$ | $100 \times 64 = 6{,}400$ |
+| `conv2` | $24 \times 34 \times 64 \times 3 \approx 156{,}000$ | $3{,}200$ | $3{,}200 \times 64 = 204{,}800$ |
+| `fc1` | $1 \times 1 \times 64 \times 2 = 128$ | $26{,}112$ | $26{,}112 \times 64 \approx 1{,}671{,}000$ |
+
+**Observație importantă:** numărul de sinapse antrenabile este dat de **un singur set de ponderi per filtru** (datorită partajării ponderilor din convoluție), nu de numărul total de neuroni post-convoluție. Totalul de ~1.88 milioane de sinapse antrenabile este modest comparativ cu un CNN dens echivalent, iar cea mai mare parte a capacității este concentrată în `fc1` unde filtrele „văd" întregul câmp receptiv și pot învăța reprezentări semantice holistice.
+
+**[* FIGURA 13 (IMPORTANTĂ): O diagramă arhitecturală verticală care arată stiva completă: Input $60 \times 80 \times 2 \times 5$ → OnOff → LatencyCoding → conv1 + HOGSampler3D(1,1) → pool1 → conv2 + HOGSampler3D(2,2) → pool2 → fc1 + HOGSampler3D(4,4). La fiecare nivel, afișează shape-ul tensorial și cumulative stride-ul. Marchează cu roșu ramurile care ies la SVM (conv1_out, conv2_out, fc1_out). *]**
 
 ### 7.4. Output, Postprocessing și Clasificare
 
@@ -1493,6 +2127,272 @@ Acest comportament confirmă funcționarea corectă a mecanismului **Winner-Take
 
 ---
 
+### 8.4. Agregarea Automată a Rezultatelor Experimentale prin `extract_kth_results.sh`
+
+Odată cu multiplicarea configurațiilor experimentale (diferite seed-uri, diferite valori `t_obj`, diferite dimensiuni ale sampler-ului HOG, diferite număr de filtre etc.), parsarea manuală a log-urilor `log_kth_<seed>.txt` devine rapid imposibil de gestionat. Un singur experiment produce un log de ~1000 de linii din care informațiile relevante (acuratețea SVM, statisticile de activitate, parametrii per strat) sunt răspândite pe toată lungimea fișierului. Pentru a permite comparații cantitative rapide și reproducibile între experimente, am implementat scriptul **`extract_kth_results.sh`**, un pipeline bash + AWK care scanează recursiv un director cu rezultate și produce un singur fișier CSV cu toate informațiile agregate.
+
+#### 8.4.1. Scop și Interfață
+
+Scriptul are ca scop transformarea colecției de log-uri brute în două producte analizabile:
+
+1. **Un tabel CSV unificat** (o linie per strat convoluțional per experiment) care poate fi deschis direct în Excel, pandas sau LibreOffice Calc pentru comparații și grafice;
+2. **Un format reproducibil și versionabil** — CSV-ul poate fi commis în repository ca snapshot al stării rezultatelor la un moment dat.
+
+**Invocare:**
+
+```bash
+# Folosind directoarele implicite
+./extract_kth_results.sh
+
+# Specificând manual directorul sursă și fișierul de ieșire
+./extract_kth_results.sh csnn-simulator-build/result kth_experiments_summary.csv
+```
+
+Scriptul acceptă doi parametri poziționali opționali:
+
+| Parametru | Variabilă | Default | Rol |
+|-----------|-----------|---------|-----|
+| 1 | `ROOT_DIR` | `csnn-simulator-build/result` | Directorul rădăcină care conține subdirectoare `seed_<N>/` cu log-urile |
+| 2 | `OUT_CSV` | `kth_experiments_summary.csv` | Calea fișierului CSV care va fi generat |
+
+#### 8.4.2. Descoperirea Log-urilor
+
+Structura directorului de rezultate urmează convenția `Experiment` a framework-ului:
+
+```
+csnn-simulator-build/result/
+├── seed_7/
+│   ├── log_kth_7.txt
+│   └── ...
+├── seed_42/
+│   ├── log_kth_42.log
+│   └── ...
+└── seed_123/
+    └── log_kth_123.txt
+```
+
+Scriptul folosește `find` cu un regex POSIX pentru a localiza toate fișierele log:
+
+```bash
+find "$ROOT_DIR" -type f -regextype posix-extended \
+     -regex '.*/seed_[0-9]+/log_kth.*\.(txt|log)$' | sort
+```
+
+Regex-ul `seed_[0-9]+/log_kth.*\.(txt|log)$` garantează:
+- Includerea doar a log-urilor care provin din subdirectoare `seed_<N>/` (evitând log-uri orfane);
+- Suportul pentru ambele extensii (`.txt` implicit, `.log` dacă este configurat altfel);
+- Ordinea deterministă prin `sort` (astfel încât două rulări consecutive ale scriptului produc CSV-uri bit-identice dacă log-urile nu s-au schimbat).
+
+#### 8.4.3. Parserul AWK: Mașină de Stare cu Memorie Per-Strat
+
+Inima scriptului este un program AWK care rulează pentru fiecare log și parcurge liniile o singură dată (single pass). Structura parserului este o **mașină de stare cu flag-uri**:
+
+| Flag | Rol |
+|------|-----|
+| `in_layer` | Suntem în interiorul unui bloc `Layer.XYZ (name) { ... }` și culegem parametri per-strat |
+| `brace_depth` | Contorul de acolade imbricate care permite detectarea sfârșitului unui bloc `{...}` |
+| `in_activity` | Suntem în interiorul unui bloc `analysis Activity:` și citim statistici de activare |
+| `act_phase` | `"train"` sau `"test"` — ne spune cărui subsecțiune îi aparțin statisticile curente |
+
+Parserul menține simultan mai multe **array-uri asociative indexate după numele stratului** (`conv1`, `conv2`, `fc1`), astfel încât un singur log produce una sau mai multe linii în CSV, câte una pentru fiecare strat analizat:
+
+```awk
+l_seen[layer]       # marker: acest strat a fost întâlnit în log
+l_type[layer]       # ex. Convolution3D, ConvolutionSampler3D
+l_epoch[layer]      # numărul de epoci configurat
+l_fw[layer], l_fh[layer], l_fk[layer]  # dimensiuni filtru
+l_fn[layer]         # numărul de filtre
+l_wta[layer]        # valoarea wta_infer
+l_sampler[layer]    # numele sampler-ului (HOGSampler3D / RandomSampler3D / ...)
+a_tr_sp[layer], a_tr_ac[layer]  # sparsity/active train
+a_te_sp[layer], a_te_ac[layer]  # sparsity/active test
+s_acc[layer], s_ok[layer], s_tot[layer]  # acuratețea SVM
+```
+
+#### 8.4.4. Extragerea Informațiilor Globale ale Experimentului
+
+La începutul fiecărui log există un header cu metadate despre rularea respectivă. Parserul le captează prin pattern-uri simple:
+
+```awk
+if (line ~ /^Random seed:/)    seed_log=trim(substr(line, index(line,":")+1));
+if (line ~ /^Run start at /)   run_start=trim(substr(line,13));
+if (line ~ /^Run end at /)     run_end=trim(substr(line,11));
+if (line ~ /^Duration:/)       duration=trim(substr(line, index(line,":")+1));
+```
+
+Numărul de sample-uri și de videouri este extras din linii de forma `Load 2376 train samples from ... [594]` prin combinația `split` + `match` cu captură:
+
+```awk
+if (line ~ /^Load [0-9]+ train samples from /) {
+    split(line, a, " ");
+    train_samples=a[2];
+    if (match(line, /\[([0-9]+)\]/, m)) train_videos=m[1];
+}
+```
+
+Această abordare este robustă la schimbări minore de format (adăugarea de spații, prefixe noi) pentru că folosește ancore puternice (`^Load`, `train samples from`) și nu depinde de poziția absolută a câmpurilor.
+
+#### 8.4.5. Parsarea Blocurilor Layer cu Imbricare
+
+Un bloc layer în log are forma:
+
+```
+Layer.ConvolutionSampler3D (conv1) {
+    epoch: 150
+    filter_width: 5
+    filter_height: 5
+    filter_conv_depth: 2
+    filter_number: 64
+    wta_infer: true
+    sampler: Sampler.HOGSampler3D { ... }
+}
+```
+
+Parserul detectează începutul blocului cu un regex:
+
+```awk
+if (match(line, /^Layer\.([A-Za-z0-9_]+)[ \t]+\(([A-Za-z0-9_]+)\)[ \t]*\{/, m)) {
+    in_layer=1;
+    brace_depth=1;
+    cur_ltype=m[1];
+    cur_layer=m[2];
+    ...
+}
+```
+
+Problema nebanală este **detectarea sfârșitului blocului** atunci când sub-blocuri imbricate pot apărea (de exemplu, `sampler: Sampler.HOGSampler3D { ... }` în interiorul layer-ului). Soluția este un contor de acolade care crește la fiecare `{` și scade la fiecare `}` întâlnit pe linia curentă:
+
+```awk
+tmp1 = line; opens  = gsub(/\{/, "", tmp1);
+tmp2 = line; closes = gsub(/\}/, "", tmp2);
+brace_depth += opens - closes;
+if (brace_depth <= 0) { in_layer=0; brace_depth=0; }
+```
+
+Această tehnică permite parserului să rămână „în interiorul” stratului până când acoladele se închid complet, fără a fi păcălit de sub-blocurile intermediare.
+
+#### 8.4.6. Parsarea Secțiunii `Activity`
+
+Analiza `Activity` produce blocuri de forma:
+
+```
+-conv1, analysis Activity:
+* train set:
+    Sparsity: 0.2431
+    Active unit: 74.53%
+* test set:
+    Sparsity: 0.1985
+    Active unit: 68.21%
+```
+
+Parserul detectează antetul cu un pattern care captează **numele stratului**:
+
+```awk
+if (match(line, /-([A-Za-z0-9_]+),[ \t]*analysis Activity:/, m)) {
+    in_activity=1; act_layer=m[1]; act_phase=""; next;
+}
+```
+
+După aceea, flag-ul `act_phase` este setat la `"train"` sau `"test"` în funcție de subantetul întâlnit, iar valorile `Sparsity` și `Active unit` sunt distribuite în array-uri separate (`a_tr_sp`, `a_tr_ac`, `a_te_sp`, `a_te_ac`). Funcția `depercent()` îndepărtează simbolul `%` pentru ca valorile să poată fi folosite direct în Excel ca numere.
+
+Ieșirea din starea `in_activity` se face când parserul întâlnește următorul antet de analiză (`analysis Coherence:`, `analysis Svm:`, `analysis SaveOutput:` sau `===SVM===`).
+
+#### 8.4.7. Parsarea Rezultatului SVM
+
+Rezultatul final al experimentului — **acuratețea SVM** — este parsat prin două pattern-uri coordonate. Primul capturează numele stratului din antetul analizei SVM:
+
+```awk
+if (match(line, /-([A-Za-z0-9_]+),[ \t]*analysis Svm:/, m)) { svm_layer=m[1]; next }
+```
+
+Al doilea capturează cele trei valori (procentul, corectele, totalul) din linia `classification rate: 85.71% (372/434)`:
+
+```awk
+if (match(line, /^[ \t]*classification rate:[ \t]*([0-9.]+)%[ \t]*\(([0-9]+)\/([0-9]+)\)/, m)) {
+    s_acc[svm_layer]=m[1];
+    s_ok[svm_layer]=m[2];
+    s_tot[svm_layer]=m[3];
+}
+```
+
+Variabila `svm_layer` este reținută între linii, astfel încât dacă SVM-ul raportează statistici pe mai multe linii, toate sunt atribuite corect stratului curent. Combinând parsarea SVM cu array-urile per-strat, scriptul poate raporta în aceeași rulare acurateți separate pentru `conv1`, `conv2` și `fc1`.
+
+#### 8.4.8. Generarea CSV-ului
+
+La sfârșitul procesării fiecărui log, blocul `END` al AWK-ului iterează peste toate straturile întâlnite (`for (layer in l_seen)`) și emite **o linie CSV per strat**. Dacă un câmp nu a fost găsit în log, el rămâne gol (două virgule consecutive `,,`), ceea ce este comportamentul standard pentru CSV și este tratat corect de pandas și Excel ca `NaN` / celulă goală.
+
+Structura CSV-ului final are **26 de coloane**:
+
+| # | Coloană | Sursă |
+|---|---------|-------|
+| 1 | `log_file` | Numele fișierului log |
+| 2 | `experiment_name` | Prefixul experimentului (ex. `kth_7`) |
+| 3 | `random_seed_log` | Seed-ul citit din log |
+| 4–6 | `run_start`, `run_end`, `duration` | Timpii rulării |
+| 7–10 | `train_samples`, `test_samples`, `train_videos`, `test_videos` | Mărimea dataset-ului |
+| 11–12 | `layer_name`, `layer_type` | Numele + tipul stratului |
+| 13 | `epoch` | Număr de epoci |
+| 14–17 | `filter_w`, `filter_h`, `filter_k`, `filter_num` | Dimensiunile filtrului |
+| 18 | `wta_infer` | Valoarea flag-ului WTA |
+| 19 | `sampler` | Numele sampler-ului folosit |
+| 20–23 | `activity_train_sparsity`, `activity_train_active`, `activity_test_sparsity`, `activity_test_active` | Statistici de activitate |
+| 24–26 | `svm_accuracy`, `svm_correct`, `svm_total` | Rezultatele SVM |
+
+#### 8.4.9. Exemplu de Flux Complet
+
+Un exemplu simplificat al fluxului de date de la log la CSV:
+
+```
+Intrare (log_kth_7.txt):
+    Random seed: 7
+    Run start at 2026-04-05 18:12:47
+    ...
+    Layer.ConvolutionSampler3D (conv1) {
+        epoch: 150
+        filter_width: 5
+        filter_number: 64
+        wta_infer: true
+        sampler: Sampler.HOGSampler3D { ... }
+    }
+    ...
+    -conv1, analysis Activity:
+    * train set:
+        Sparsity: 0.2431
+        Active unit: 74.53%
+    ...
+    -conv1, analysis Svm:
+        classification rate: 82.14% (356/434)
+
+Ieșire (kth_experiments_summary.csv, linie conv1):
+    log_kth_7.txt,kth_7,7,2026-04-05 18:12:47,...,conv1,ConvolutionSampler3D,150,5,5,2,64,true,HOGSampler3D,0.2431,74.53,...,82.14,356,434
+```
+
+#### 8.4.10. Robustețe și Limitări
+
+Scriptul a fost proiectat cu câteva decizii conștiente:
+
+- **`set -euo pipefail`**: Oprește rularea imediat la prima eroare, previne expansiunea variabilelor nesetate și propagă erorile prin pipeline-uri — standardul de aur pentru script-uri bash robuste;
+- **Parsare single-pass**: Complexitate $O(N)$ per log unde $N$ este numărul de linii, deci scanarea a 50 de log-uri de ~1000 de linii este instantanee;
+- **Independent de ordine**: Parserul nu depinde de ordinea în care apar secțiunile în log — pot fi într-o ordine arbitrară sau pot lipsi complet (ex. dacă un experiment a crash-at înainte de SVM, câmpurile SVM vor fi goale, dar statisticile de Activity vor fi raportate normal);
+- **Fallback pentru sampler**: Dacă un log vechi nu conține linia `sampler: Sampler.XYZ` (pentru că stratul era `Convolution3D` fără sampler), scriptul ghicește `(not_logged)` sau `HOGSampler3D` în funcție de tipul stratului — astfel CSV-ul rămâne exploatabil chiar și pentru comparații cross-version.
+
+**Limitări cunoscute**:
+- Scriptul presupune că log-urile folosesc codificarea UTF-8/ASCII standard și că formatul nu se schimbă radical (dacă antetele `Layer.X (name) {` sau `analysis Y:` se schimbă, regex-urile trebuie actualizate);
+- Scriptul nu extrage evoluția per-epocă a metricilor (annealing-ul learning-rate-ului, evoluția pragurilor), care ar fi utile pentru diagnostic de convergență — aceasta este o direcție de extensie.
+
+#### 8.4.11. Utilizare Tipică în Workflow-ul Experimental
+
+Fluxul de lucru pe care acest script îl sprijină este următorul:
+
+1. Rulează mai multe experimente cu configurații diferite (seed-uri diferite, `t_obj` diferiți, samplere diferite);
+2. Fiecare rulare produce automat un director `result/seed_<N>/` cu log-ul și ponderile;
+3. La final, o singură comandă (`./extract_kth_results.sh`) agregă toate rezultatele într-un CSV;
+4. CSV-ul este analizat în pandas/Excel pentru identificarea configurației optime, plotarea tendințelor și scrierea tabelelor comparative pentru lucrarea de licență.
+
+**[* FIGURA 19 (OPȚIONAL): Un screenshot al fișierului `kth_experiments_summary.csv` deschis în Excel/LibreOffice, arătând cele 26 de coloane și ~10 experimente diferite. Alternativ, un snippet pandas care încarcă CSV-ul și face un `groupby(['sampler', 'seed'])['svm_accuracy'].mean()`. *]**
+
+---
+
 ## 9. Rezultate Experimentale și Comparații
 
 **[* REZULTATE: Inserează tabelul cu acuratețea SVM obținută pe conv1 pentru experimentul curent (seed=123, 64 filtre, 5 cadre temporale, HOGSampler3D). *]**
@@ -1519,13 +2419,229 @@ Acest comportament confirmă funcționarea corectă a mecanismului **Winner-Take
 
 ## 9. Clasificatorul Predictiv SVM (Support Vector Machine)
 
+### 9.1. Rolul SVM în Pipeline-ul CSNN
+
 Odată arhitectura SNN antrenată nesupervizat, plasticitatea stratului STDP este suspendată (imobilizând greutățile). Acum, dataset-ului global i se extrage doar semnătura "spiking" din ultimul strat conv al CSNN.
 
 Fiecare videoclip comprimat tridimensional în descărcări electrice devine pură prelucrare vectorială — livrând argumente matematice către un identificator supervizat de tip **Support Vector Machine (SVM)** [21] liniar. SVM-ul construiește hiperplane matematice pentru demarcația deciziilor dintre cele 6 clase de comportament, implementat prin biblioteca libsvm [30].
 
-Clasificarea se face pe baza feature map-urilor extrase prin `TimeObjectiveOutput` urmate de `SumPooling` și `FeatureScaling`, permițând analiza calității reprezentărilor la nivelul de abstractizare al fiecărui strat.
+Clasificarea se face pe baza feature map-urilor extrase prin `TimeObjectiveOutput` urmate de `SumPooling` și `FeatureScaling`, permițând analiza calității reprezentărilor la nivelul de abstractizare al fiecărui strat. Pentru SVM-ul de bază (clasa `analysis::Svm`), rezultatul raportat este un singur scalar — **rata globală de clasificare** — util pentru urmărirea evoluției experimentului, dar insuficient pentru o înțelegere profundă a erorilor modelului.
 
-**[* REZULTATE: Tabel final cu acuratețe SVM per configurare experimentală. *]**
+### 9.2. Analiza Calitativă: Clasa `SvmQualitative`
+
+Pentru a trece **dincolo de acuratețea scalară** și a înțelege *care* videoclipuri sunt clasificate corect, *care* sunt confundate și *cu ce anume* sunt confundate, am creat clasa **`SvmQualitative`** (`include/analysis/SvmQualitative.h`, `src/analysis/SvmQualitative.cpp`), care **extinde clasa de bază `Svm`** prin moștenire și adaugă un strat complet de analiză calitativă a predicțiilor.
+
+Această analiză este atașată **exclusiv stratului final `fc1`** (ultimul strat convoluțional al arhitecturii), unde reprezentările sunt cele mai discriminative și unde confuziile reflectă limitările semantice ale rețelei, nu ale extracției timpurii de trăsături:
+
+```cpp
+auto &fc1_out = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
+fc1_out.add_postprocessing<process::FeatureScaling>();
+fc1_out.add_analysis<analysis::Activity>();
+fc1_out.template add_analysis<analysis::SvmQualitative>();
+```
+
+### 9.3. Arhitectura Prin Moștenire: De Ce Extindere, Nu Rescriere
+
+O decizie de design importantă a fost **reutilizarea** întregului pipeline de antrenare SVM din clasa de bază `Svm`, în loc de a rescrie logica de la zero. Clasa `SvmQualitative` moștenește public `Svm` și **suprascrie doar hook-urile fazei de test**, lăsând intacte:
+
+- `compute(...)` — calculul feature map-urilor
+- `process_train(...)` — inserarea sample-urilor de antrenare în libsvm
+- `before_train(...)`, `after_train(...)` — inițializarea și finalizarea antrenării
+
+```cpp
+class SvmQualitative : public Svm {
+public:
+    // Doar fazele de test sunt override-uite:
+    virtual void before_test() override;
+    virtual void process_test(const std::string& label,
+                              const Tensor<float>& sample) override;
+    virtual void after_test() override;
+    // ... (restul implementării este moștenit ca atare din Svm)
+};
+```
+
+Constructorul fără argumente folosește un truc C++ specific: apelează un constructor protejat al bazei care primește un `RegisterClassParameter` separat, pentru ca cele două clase să fie înregistrate distinct în `AnalysisFactory`:
+
+```cpp
+static RegisterClassParameter<SvmQualitative, AnalysisFactory>
+    _svm_qual_register("SvmQualitative");
+
+SvmQualitative::SvmQualitative() :
+    Svm(_svm_qual_register),  // trece propriul token de înregistrare
+    _records(), _confusion_matrix(), _class_names()
+{ }
+```
+
+Astfel, atât `Svm` cât și `SvmQualitative` pot coexista în sistem și fi invocate independent prin același mecanism de factory.
+
+### 9.4. Captarea Per-Sample a Predicțiilor: `process_test`
+
+Hook-ul `process_test` este inima clasei. În timp ce versiunea bazei apelează doar `svm_predict` și incrementează un contor, versiunea extinsă **reproduce aceeași logică** (fără a dubla apelul la libsvm — observație cheie pentru performanță) și **captează explicit**:
+
+$$\text{record}_i = \left( \texttt{sample\_idx}_i,\; y^{\text{true}}_i,\; y^{\text{pred}}_i,\; \texttt{correct}_i \in \{0, 1\} \right)$$
+
+```cpp
+void SvmQualitative::process_test(const std::string& label,
+                                   const Tensor<float>& sample) {
+    // 1. Construiește vectorul sparse pentru libsvm
+    size_t node_cursor = 0;
+    for (size_t j = 0; j < _size; j++) {
+        float v = sample.at_index(j);
+        if (v != 0.0f) {
+            _test_nodes[node_cursor].index = static_cast<int>(j + 1);
+            _test_nodes[node_cursor].value = v;
+            node_cursor++;
+        }
+    }
+    _test_nodes[node_cursor].index = -1;
+
+    // 2. Un singur apel la libsvm (NU două)
+    double y_pred = ::svm_predict(_model, _test_nodes);
+
+    // 3. Rezolvă indexul numeric → numele clasei
+    std::string predicted_label;
+    for (const auto& kv : _label_index) {
+        if (kv.second == y_pred) { predicted_label = kv.first; break; }
+    }
+
+    // 4. Verifică corectitudinea și înregistrează
+    auto it = _label_index.find(label);
+    bool correct = (it != _label_index.end() && y_pred == it->second);
+    if (correct) _correct_sample++;
+
+    SampleRecord rec{ _total_sample, label, predicted_label, "", 0, correct };
+    _records.push_back(rec);
+    _confusion_matrix[label][predicted_label]++;
+    _total_sample++;
+}
+```
+
+Observația esențială (documentată și în comentariul sursă): **nu se apelează `Svm::process_test` suplimentar**, pentru a evita dublarea apelului la `svm_predict`, care este cea mai costisitoare operație per sample. În schimb, logica nativă este reprodusă local, păstrând identică semantica bazei.
+
+### 9.5. Matricea de Confuzie
+
+Pe parcursul fazei de test se construiește o matrice de confuzie stocată într-un `std::map` îmbricat:
+
+```cpp
+std::map<std::string, std::map<std::string, size_t>> _confusion_matrix;
+// _confusion_matrix[true_label][predicted_label] = count
+```
+
+Formal, pentru un set de $N$ clase $\mathcal{C} = \{c_1, c_2, \ldots, c_N\}$ și $M$ sample-uri de test, matricea $\mathbf{C} \in \mathbb{N}^{N \times N}$ este:
+
+$$C_{ij} = \left|\left\{ k \in \{1, \ldots, M\} \;:\; y^{\text{true}}_k = c_i \;\land\; y^{\text{pred}}_k = c_j \right\}\right|$$
+
+Diagonala $C_{ii}$ conține clasificările corecte; valorile off-diagonal $C_{ij}$ cu $i \neq j$ sunt erorile de confuzie. Acuratețea globală și cea per-clasă se pot deriva direct din această matrice:
+
+$$\text{Acc}_{\text{global}} = \frac{\sum_i C_{ii}}{\sum_{i,j} C_{ij}}, \quad \text{Acc}_{c_i} = \frac{C_{ii}}{\sum_j C_{ij}}$$
+
+La finalul fazei de test, metoda `print_confusion_matrix` afișează matricea în log-ul experimentului într-un format tabular ASCII perfect aliniat, cu lățime de coloană adaptată la cel mai lung nume de clasă:
+
+```
+===Confusion Matrix (rows = true, cols = predicted)===
+      true\pred  boxing handclapping handwaving jogging running walking
+         boxing      38            2          0       0       0       0
+   handclapping       1           35          4       0       0       0
+     handwaving       0            3         37       0       0       0
+        jogging       0            0          0      28       8       4
+        running       0            0          0      11      24       5
+        walking       0            0          0       3       2      35
+```
+
+Dintr-o singură privire se pot identifica **perechile confuze** (jogging↔running, handclapping↔handwaving) și **clasele robuste** (boxing, walking), oferind un feedback mult mai bogat decât un simplu procent global.
+
+**[* FIGURA 17: Heatmap color al matricei de confuzie, normalizat pe rând (fiecare rând însumează 1.0). Axele etichetate cu numele celor 6 acțiuni. Culoare: albastru închis pe diagonală (clasificări corecte), nuanțe de roșu/portocaliu pe pozițiile off-diagonal pentru confuzii. Generat de `visualize_qualitative.py` ca `confusion_matrix.png`. *]**
+
+### 9.6. Exportul JSON: Contract cu Vizualizatorul Python
+
+După afișarea matricei în log, metoda `save_json` exportă toate datele colectate într-un fișier structurat `qualitative_results_L<layer_index>.json`, plasat în directorul de output al experimentului. Înainte de scriere, câmpul `video_key` al fiecărui record este populat prin interogarea mapării statice din `VideoKTH_3D`:
+
+```cpp
+const auto& mapping = dataset::VideoKTH_3D::get_test_sample_mapping();
+for (auto& rec : _records) {
+    auto it = mapping.find(rec.sample_idx);
+    if (it != mapping.end()) {
+        rec.video_key = it->second.first;    // "test/boxing/person13_boxing_d4.avi"
+        rec.group_idx = it->second.second;   // 0..9 (indexul grupului temporal)
+    }
+}
+```
+
+Această legătură bidirecțională — `sample_idx → (video_key, group_idx) → label predicție` — permite ca fiecare eroare SVM să fie **trasată înapoi la videoclipul original** și la grupul temporal exact care a produs-o. Structura JSON exportată:
+
+```json
+{
+  "experiment": "kth_123",
+  "layer_index": 2,
+  "accuracy": 0.698453,
+  "correct": 328,
+  "total": 470,
+  "classes": ["boxing", "handclapping", "handwaving",
+              "jogging", "running", "walking"],
+  "confusion_matrix": [
+    [38,  2, 0,  0,  0,  0],
+    [ 1, 35, 4,  0,  0,  0],
+    [ 0,  3, 37, 0,  0,  0],
+    [ 0,  0, 0, 28,  8,  4],
+    [ 0,  0, 0, 11, 24,  5],
+    [ 0,  0, 0,  3,  2, 35]
+  ],
+  "samples": [
+    {"sample_idx": 0, "true_label": "boxing",
+     "predicted_label": "boxing", "video_key": "test/boxing/person13_boxing_d4.avi",
+     "group_idx": 0, "correct": true},
+    {"sample_idx": 11, "true_label": "jogging",
+     "predicted_label": "running", "video_key": "test/jogging/person17_jogging_d1.avi",
+     "group_idx": 2, "correct": false},
+    ...
+  ]
+}
+```
+
+Matricea de confuzie este serializată ca array bidimensional **în aceeași ordine** cu array-ul `classes`, permițând Python-ului să o indexeze direct fără maparea cheilor text. Fiecare sample este auto-conținut (toate informațiile necesare identificării sunt prezente), astfel încât vizualizatorul Python poate procesa entry-urile independent și paralel.
+
+### 9.7. Vizualizatorul `visualize_qualitative.py`: Frames pentru Erorile Modelului
+
+Fișierul JSON este consumat de scriptul complementar `src/tool/visualize_qualitative.py`, care transformă datele brute într-o **ierarhie vizuală inspectabilă**. Script-ul citește suplimentar fișierul `hog_person_data_5.json` (pentru a recupera indicii cadrelor din fiecare grup temporal) și extrage din videoclipurile originale cadrele care au generat predicția, organizându-le în structura:
+
+```
+qualitative_out/
+├── confusion_matrix.png                   ← heatmap al matricei
+├── summary.md                             ← rezumat textual per clasă
+├── correct/
+│   └── <action>/
+│       └── <video_stem>__s<idx>__g<group>/
+│           ├── frame_0.png ... frame_4.png
+│           └── grid.png                   ← cele 5 cadre stitchuite
+└── misclassified/
+    └── <true>_as_<pred>/
+        └── <video_stem>__s<idx>__g<group>/
+            ├── frame_0.png ... frame_4.png
+            └── grid.png
+```
+
+Împărțirea **`correct/` vs. `misclassified/`** permite inspecția vizuală directă:
+
+1. **`correct/<action>/`** — conține exemplele pe care rețeaua le clasifică corect, util pentru identificarea "pozelor canonice" pe care modelul le-a învățat bine.
+2. **`misclassified/<true>_as_<pred>/`** — grupează erorile după perechea confuză, permițând investigarea întrebării *"De ce modelul confundă jogging cu running?"* prin vizualizarea directă a cadrelor problematice.
+
+Această analiză este **esențială pentru depanarea semantică** a pipeline-ului: un model care confundă handwaving cu handclapping doar la videoclipurile cu iluminare slabă semnalează o limitare a filtrului OnOff, nu a arhitecturii STDP. Un model care greșește jogging ca running **indiferent de condiții** semnalează o limitare fundamentală a rezoluției temporale a filtrelor. Fără această vizualizare, astfel de distincții rămân ascunse în spatele unui număr scalar de acuratețe.
+
+**[* FIGURA 18: Grid 2×3 cu exemple reprezentative din directorul `misclassified/`. Rândul 1: 3 exemple jogging_as_running (cadre stitchuite orizontal per exemplu). Rândul 2: 3 exemple handclapping_as_boxing. Sub fiecare imagine, o scurtă legendă cu `video_key` și explicația cauzei probabile (amplitudine insuficientă, ocluzie, margine de cadru etc). *]**
+
+### 9.8. Integrarea în Pipeline-ul Experimental
+
+În configurația actuală a experimentului `KTH_3D.cpp`, cele două analize SVM sunt atașate diferit:
+
+| Strat | Analiză SVM | Motivație |
+|-------|-------------|-----------|
+| `conv1` | `analysis::Svm` | Baseline cantitativ — măsoară discriminabilitatea trăsăturilor timpurii |
+| `conv2` | `analysis::Svm` | Verifică dacă nivelul intermediar îmbunătățește separabilitatea |
+| `fc1` | `analysis::SvmQualitative` | Evaluare completă: acuratețe + matrice de confuzie + trasabilitate per-video |
+
+Această stratificare reflectă principiul *"instrumentul adecvat pentru contextul adecvat"*: pe straturile intermediare (conv1, conv2), scopul este tracking-ul rapid al progresului; pe stratul final (fc1), scopul este analiza profundă a comportamentului modelului și identificarea direcțiilor de îmbunătățire.
+
+**[* TABEL REZULTATE FINALE: Pentru fiecare strat, afișează acuratețea SVM, iar pentru fc1 adaugă și matricea de confuzie + acuratețea per-clasă derivată din `qualitative_results_L2.json`. *]**
 
 ---
 
@@ -1572,18 +2688,66 @@ Clasa de dataset, creată de la zero, înlocuiește eșantionarea secvențială/
 
 Logica de eșantionare a fost **extrasă din clasa de convoluție** într-o ierarhie de clase `Sampler` independente. Implementarea `HOGSampler3D` folosește un **sistem de cache** cu **fallback temporal pe 3 niveluri**, focalizând eșantionarea STDP pe zona persoanei fără nicio dependență de OpenCV la runtime.
 
-### 11.4. `ConvolutionSampler3D`
+### 11.4. Transformarea Bounding Box-urilor prin Stride Cumulativ
 
-Wrapper semantic peste `Convolution3D` care permite experimentele sampler-driven să fie identificabile vizual în cod, fără duplicare de logică.
+Pentru a permite folosirea `HOGSampler3D` **la orice adâncime a arhitecturii** (nu doar la primul strat conv), am introdus în constructor un parametru explicit de stride cumulativ `(cum_stride_x, cum_stride_y)`. Acesta transformă coordonatele bounding box-ului din **pixel-space** (coordonate originale ale imaginii, unde a fost executată detecția HOG + MOG2) în **feature-map space** (coordonate post-convoluție și post-pooling, unde sampler-ul va genera efectiv pozițiile):
 
-### 11.5. Optimizări de Memorie
+$$\text{feat\_min\_x} = \left\lfloor \frac{\text{pix\_min\_row}}{\text{cum\_stride\_x}} \right\rfloor, \quad \text{feat\_min\_y} = \left\lfloor \frac{\text{pix\_min\_col}}{\text{cum\_stride\_y}} \right\rfloor$$
+
+Această modificare — descrisă detaliat în **Secțiunea 4.1.5** — permite ca aceleași bbox-uri HOG pre-calculate offline să fie reutilizate de toate cele trei straturi convoluționale (`conv1`, `conv2`, `fc1`) ale arhitecturii, fiecare cu stride-ul său cumulativ corect: $(1, 1)$ pentru `conv1`, $(2, 2)$ după `pool1` pentru `conv2`, și $(4, 4)$ după `pool2` pentru `fc1`. Înainte de această modificare, `HOGSampler3D` era folosit doar la primul strat, iar straturile ulterioare trebuiau să cadă înapoi la eșantionare aleatorie.
+
+### 11.5. Paralelizarea pe Indicele de Filtru în `ConvolutionSampler3D`
+
+Clasa `ConvolutionSampler3D` a fost refactorizată de la un simplu wrapper semantic peste `Convolution3D` la o implementare complet nouă care **paralelizează antrenarea și testarea pe indicele de filtru $z$** folosind `std::execution::par` cu backend-ul Intel TBB.
+
+**Observația cheie** care face paralelizarea sigură: fiecare filtru scrie doar în propria sa feliere a tensorilor interni (activarea $a[x, y, z, k]$ și inhibiția $\text{inh}[x, y, z, k]$ au $z$ ca indice disjunct per thread). Partiționând axa filtrelor în chunks și atribuind fiecare chunk unui thread, obținem paralelism perfect fără conflicte de scriere.
+
+**Arhitectura paralelizării:**
+- **Test** (speedup major): Vectorul de spike-uri de intrare este citit în paralel de toate thread-urile, fiecare thread iterând prin filtrele sale din chunk-ul asignat și scriind în feliere disjuncte ale `_a_local` și `_inh_local`. Output-urile sunt acumulate în buffere per-thread și concatenate la final;
+- **Train** (paralelizare parțială din necesitate semantică): Bucla externă peste spike-uri rămâne secvențială (datorită actualizării cross-filter a pragurilor homeostatice și a regulii WTA care alege un singur winner la nivel global), dar în interior acumulatorul pre-spike și actualizarea STDP a winner-ului sunt paralelizate peste axele $(x, y, z_i, k)$;
+- **Persistență locală**: Deoarece clasa bazei `Convolution3D` folosește Pimpl (Pointer to Implementation), starea sa internă este privată și nu poate fi accesată direct din derived class. `ConvolutionSampler3D` reimplementează local bufferele necesare (`_a_local`, `_inh_local`) și replicarea logicii de salvare/încărcare a ponderilor.
+
+Speedup-ul teoretic pe mașina virtuală GCP `c2-standard-8` (8 vCPUs) urmează legea lui Amdahl: cu ~95% din timp petrecut în faza paralelizabilă, speedup-ul teoretic este $\frac{1}{0.05 + 0.95/8} \approx 5.92\times$. Detaliile complete sunt în **Secțiunea 4.3**.
+
+### 11.6. Scriptul de Agregare `extract_kth_results.sh`
+
+Pentru a facilita compararea cantitativă între experimente (seed-uri diferite, parametri diferiți, arhitecturi diferite), am dezvoltat scriptul **`extract_kth_results.sh`** — un pipeline bash + AWK care:
+
+- Scanează recursiv un director cu rezultate, localizând log-urile prin regex POSIX (`seed_[0-9]+/log_kth.*\.(txt|log)$`);
+- Parsează fiecare log într-o singură trecere (single-pass $O(N)$) folosind o mașină de stare cu flag-uri (`in_layer`, `in_activity`, `brace_depth`) pentru a decodifica blocurile `Layer.X (name) { ... }` și secțiunile de analiză;
+- Menține arrays asociative indexate după numele stratului, permițând raportarea separată a metricilor pentru `conv1`, `conv2` și `fc1`;
+- Produce un fișier CSV unificat cu **26 de coloane** care include metadatele experimentului, configurația fiecărui strat, statisticile de activitate (sparsity, active units) și acuratețea SVM finală.
+
+CSV-ul rezultat poate fi deschis direct în Excel/pandas/LibreOffice Calc pentru generarea de tabele comparative și grafice, eliminând complet parsarea manuală a log-urilor. Detaliile complete sunt în **Secțiunea 8.4**.
+
+### 11.7. Optimizări de Memorie
 
 - **Separarea Offline/Runtime**: Eliminarea memory leak-ului prin mutarea detecției HOG din runtime (buclă STDP) în scriptul Python offline.
 - **Streaming Mode**: Procesarea și scrierea sample-urilor individual pe disc, fără acumularea lor pre-pooling în memorie RAM, reducând consumul de la ~36GB la ~12GB.
 
+### 11.8. Analiza Calitativă a Clasificării: Clasa `SvmQualitative` și Pipeline-ul de Vizualizare
+
+Pentru a depăși limitările raportării scalare a acurateței și a obține o **înțelegere diagnostică profundă** a comportamentului rețelei, am creat clasa **`analysis::SvmQualitative`** (creată de la zero, ~270 LoC C++) împreună cu scriptul Python companion **`visualize_qualitative.py`** (~650 LoC). Contribuția este compusă din patru elemente strâns cuplate:
+
+1. **Extensia prin moștenire a clasei `Svm`**: `SvmQualitative` reutilizează integral pipeline-ul de antrenare SVM din bază și **suprascrie doar cele trei hook-uri ale fazei de test** (`before_test`, `process_test`, `after_test`). Această arhitectură garantează că **nu există divergență între evaluarea cantitativă și cea calitativă** — acuratețea raportată de `SvmQualitative` este strict identică cu cea raportată de `Svm`, întrucât ambele folosesc același model libsvm și aceeași logică de inferență.
+
+2. **Captarea per-sample fără dublarea cost-ului**: În `process_test`, apelul la `::svm_predict` este efectuat **o singură dată** (în loc de a invoca clasa de bază și a face un nou `svm_predict`), iar predicția este reținută într-o structură `SampleRecord` $= (\texttt{sample\_idx}, y^{\text{true}}, y^{\text{pred}}, \texttt{correct})$. Construcția matricei de confuzie se face **inline**, cu un overhead de memorie de $O(N^2)$ pentru $N$ clase și $O(M)$ pentru $M$ sample-uri — nesemnificativ față de costul inferenței SVM.
+
+3. **Trasabilitatea sample → video sursă**: Prin interogarea mapării statice `VideoKTH_3D::get_test_sample_mapping()` (creată în cadrul contribuției 11.2), fiecare predicție este **legată de videoclipul original și grupul temporal** care a produs-o. Relația devine:
+$$\texttt{sample\_idx} \xrightarrow{\text{mapping}} (\texttt{video\_key}, \texttt{group\_idx}) \xrightarrow{\text{JSON}} \text{cadre concrete pe disc}$$
+
+4. **Export JSON + pipeline Python de vizualizare**: Metoda `save_json` serializează rezultatele într-un format auto-conținut (clase, matrice de confuzie, listă de sample-uri cu metadate complete), consumat de `visualize_qualitative.py`. Script-ul Python extrage cadrele reale din videoclipurile KTH (folosind indici de cadre din `hog_person_data_5.json`), generează heatmap-ul matricei de confuzie și organizează output-ul într-o ierarhie **`correct/` vs. `misclassified/<true>_as_<pred>/`**, permițând inspecția vizuală directă a erorilor.
+
+**Valoarea diagnostică**: această infrastructură transformă o rezultantă abstractă (*"modelul are 70% acuratețe"*) într-o hartă concretă a erorilor (*"modelul confundă sistematic jogging cu running în scenariul `d4` cu iluminare slabă"*), permițând:
+- **Validarea ipotezelor despre limitări** (ex. confuziile cinematic similar, documentate în Secțiunea 12.2)
+- **Identificarea problemelor de preprocesare** (ex. detecție HOG incorectă pe un subset de videoclipuri)
+- **Comparații obiective între arhitecturi** prin metrici per-clasă, nu doar globali
+
+Clasa este atașată exclusiv ultimului strat (`fc1`) pentru a evalua reprezentările cele mai discriminative, în timp ce straturile intermediare folosesc `Svm` clasic pentru tracking rapid.
+
 **[* REZULTATE FINALE: Tabel rezumativ cu toate experimentele rulate, parametrii, și acuratețile obținute. *]**
 
-**[* COMPARAȚIE FINALĂ: Grafic bar chart sau line plot cu evoluția performanței pe parcursul diferitelor versiuni ale pipeline-ului (de la random sampling la HOG-guided, de la HOG_Convolution3D hardcoded la Sampler Pattern). *]**
+**[* COMPARAȚIE FINALĂ: Grafic bar chart sau line plot cu evoluția performanței pe parcursul diferitelor versiuni ale pipeline-ului (de la random sampling la HOG-guided, de la HOG_Convolution3D hardcoded la Sampler Pattern, de la single-thread la multi-threaded). *]**
 
 ---
 

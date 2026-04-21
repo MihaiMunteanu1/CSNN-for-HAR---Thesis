@@ -24,33 +24,25 @@
 #include "layer/ConvolutionSampler3D.h"
 #include "dataset/VideoKTH_3D.h"
 #include "dataset/ImageSequenceKTH.h"
-
+#include "process/SpikingBackgroundSubtraction.h"
 //numactl --interleave=all ./KTH_3D
-//TODO
-// evaluare cantitativa
-// evaluare calitativa - de gasit videouri bune si care nu is bune pt a vedea feature mapuri
-// daca e sa fac si alea ca la ce videouri pune eticheta gresita - Multiclass Clasification
-
-//si inainte parca mereu se lucra pe toate coreurile? acuma cand scriu htop doar uneori is pline toate apoi iara merge doar 1-2 apoi iara toate si tot asa, la
-//celalalt experiment parca mereu vedeam ca se lucra pe toate
 
 int main(int argc, char **argv)
 {
     int seed = 123; //42,7,123
-    //Experiment<SparseIntermediateExecutionNew> experiment(argc, argv, "kth",, false, false);
     Experiment<SparseIntermediateExecutionNew> experiment(
             argv, argc,
-            "result/seed_" + std::to_string(seed),
-            "model/seed_" + std::to_string(seed),
-            "kth_" + std::to_string(seed),
+            "result_vv1/seed_" + std::to_string(seed),
+            "model_vv1/seed_" + std::to_string(seed),
+            "kth_vv1_" + std::to_string(seed),
             seed, true,
             false, false
     );
 
     size_t frame_size_width = 80;
     size_t frame_size_height = 60;
-    size_t video_frames = 5; // kernel size
-    size_t frame_gap = 0;
+    size_t video_frames = 7; // kernel size
+    size_t frame_gap = 0; //skip
     size_t grey = 1;
     size_t threshold = 5;
     size_t train_sample_per_video = 10;
@@ -63,6 +55,7 @@ int main(int argc, char **argv)
     experiment.push<process::DefaultOnOffFilter>(7, 1.0, 4.0);
     experiment.push<process::MaxScaling>();
     experiment.push<LatencyCoding>();
+    experiment.push<process::SpikingBackgroundSubtraction>(experiment.name(), 1, 0);
 
 
     ///export INPUT_PATH="/mnt/c/Users/**path_to**/kth_organized/"
@@ -101,7 +94,7 @@ int main(int argc, char **argv)
     float t_obj3 = 0.75f;
 
     std::string weights_path =  "Weights/kth_123_1/3/kth_123_1.json";
-    auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(96, 5, 5, 3, "", 1, 1, 1);
+    auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(96, 5, 5, 2, "", 1, 1, 1);
     conv1.set_name("conv1");
     conv1.parameter<bool>("draw").set(false);
     conv1.parameter<bool>("save_weights").set(true);
@@ -172,8 +165,8 @@ int main(int argc, char **argv)
 //#endif
 
 //    // --- conv1 output ---
-//    auto &conv1_save = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
-//    conv1_save.add_analysis<analysis::SaveOutput>("conv1_train", "conv1_test", false);
+    auto &conv1_save = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
+    conv1_save.add_analysis<analysis::SaveOutput>("conv1_train", "conv1_test", false);
 
     auto &conv1_out = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
     conv1_out.add_postprocessing<process::SumPooling>(2,2);
@@ -183,8 +176,8 @@ int main(int argc, char **argv)
     conv1_out.add_analysis<analysis::Svm>();
 
 //    // --- conv2 output ---
-//    auto &conv2_save = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
-//    conv2_save.add_analysis<analysis::SaveOutput>("conv2_train", "conv2_test", false);
+    auto &conv2_save = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
+    conv2_save.add_analysis<analysis::SaveOutput>("conv2_train", "conv2_test", false);
 
     auto &conv2_out = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
     conv2_out.add_postprocessing<process::SumPooling>(2, 2);
@@ -194,8 +187,8 @@ int main(int argc, char **argv)
     conv2_out.add_analysis<analysis::Svm>();
 
 //    // --- fc1 output ---
-//    auto &fc1_save = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
-//    fc1_save.add_analysis<analysis::SaveOutput>("fc1_train", "fc1_test", false);
+    auto &fc1_save = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
+    fc1_save.add_analysis<analysis::SaveOutput>("fc1_train", "fc1_test", false);
 
     auto &fc1_out = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
     fc1_out.add_postprocessing<process::FeatureScaling>();

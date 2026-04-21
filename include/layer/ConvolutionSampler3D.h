@@ -77,6 +77,14 @@ namespace layer {
         bool        _weights_loaded;
         bool        _weights_saved;
 
+        // Maximum number of spikes processed during training.
+        // 0 = unlimited.  Spikes are time-sorted (earliest = most
+        // important in latency coding), so capping early keeps the
+        // most informative ones and dramatically reduces O(S×D) cost
+        // in deeper layers where input channel count explodes.
+        size_t _max_train_spikes;
+        size_t _epoch_counter;
+
         void ensure_state_allocated();
         void try_load_weights(const std::string &label);
         void try_save_weights(const std::string &label);

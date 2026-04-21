@@ -1,0 +1,167 @@
+#include "Experiment.h"
+#include "dataset/VideoKTH_3D.h"
+#include "stdp/Multiplicative.h"
+#include "stdp/Biological.h"
+#include "stdp/Proportional.h"
+#include "layer/Convolution3D.h"
+#include "Distribution.h"
+#include "execution/DenseIntermediateExecution.h"
+#include "execution/SparseIntermediateExecutionNew.h"
+#include "analysis/Svm.h"
+#include "analysis/SvmQualitative.h"
+#include "analysis/Activity.h"
+#include "analysis/Coherence.h"
+#include "layer/Pooling.h"
+#include "process/OnOffFilter.h"
+#include "process/Scaling.h"
+#include "process/Pooling.h"
+#include "process/MaxScaling.h"
+#include "stdp/Linear.h"
+#include "stdp/BiologicalMultiplicative.h"
+#include "analysis/SaveOutput.h"
+#include "sampler/RandomSampler3D.h"
+#include "sampler/HOGSampler3D.h"
+#include "layer/ConvolutionSampler3D.h"
+#include "dataset/VideoKTH_3D.h"
+#include "dataset/ImageSequenceKTH.h"
+
+//numactl --interleave=all ./KTH_3D_v2
+// Variant: input = pre-cropped person frames (80x60) extracted by
+// extract_frames_kth.py, consumed as consecutive sequences via
+// ImageSequenceKTH and RandomSampler3D.
+
+int main(int argc, char **argv)
+{
+    int seed = 123; //42,7,123
+    Experiment<SparseIntermediateExecutionNew> experiment(
+            argv, argc,
+            "result_v2/seed_" + std::to_string(seed),
+            "model_v2/seed_" + std::to_string(seed),
+            "kth_v2_" + std::to_string(seed),
+            seed, true,
+            false, false
+    );
+
+    size_t frame_size_width = 80;
+    size_t frame_size_height = 60;
+    size_t video_frames = 5; // kernel size (temporal depth)
+    size_t grey = 1;
+
+    size_t tmp_filter_size = 2;
+    size_t temp_stride = 1; // 1/2
+
+    experiment.push<process::DefaultOnOffFilter>(7, 1.0, 4.0, 3.0f);
+    experiment.push<process::MaxScaling>();
+    experiment.push<LatencyCoding>();
+
+
+    std::string cropped_path = "/home/mmuntean/kth_cropped/";
+    experiment.add_train<dataset::ImageSequenceKTH>(
+            cropped_path + "train/",
+            video_frames,
+            frame_size_width, frame_size_height,
+            grey
+    );
+    experiment.add_test<dataset::ImageSequenceKTH>(
+            cropped_path + "test/",
+            video_frames,
+            frame_size_width, frame_size_height,
+            grey
+    );
+
+
+    float th_lr = 1.0f;
+    float w_lr = 0.1f;
+
+    float t_obj1 = 0.75f;
+    float t_obj2 = 0.70f;
+    float t_obj3 = 0.75f;
+
+    auto &conv1 = experiment.push<layer::ConvolutionSampler3D>(96, 5, 5, 3, "", 1, 1, 1);
+    conv1.set_name("conv1");
+    conv1.parameter<bool>("draw").set(false);
+    conv1.parameter<bool>("save_weights").set(true);
+    conv1.parameter<bool>("save_random_start").set(false);
+    conv1.parameter<bool>("log_spiking_neuron").set(false);
+    conv1.parameter<bool>("inhibition").set(true);
+    conv1.parameter<uint32_t>("epoch").set(100);
+    conv1.parameter<float>("annealing").set(0.96f);
+    conv1.parameter<float>("min_th").set(1.0f);
+    conv1.parameter<size_t>("max_train_spikes").set(3000);
+    conv1.parameter<float>("t_obj").set(t_obj1);
+    conv1.parameter<float>("lr_th").set(th_lr);
+    conv1.parameter<bool>("wta_infer").set(false);
+    conv1.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
+    conv1.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(15.0, 0.3);
+    conv1.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
+    conv1.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
+
+    auto &pool1 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+    pool1.set_name("pool1");
+
+    auto &conv2 = experiment.push<layer::ConvolutionSampler3D>(64, 5, 5, tmp_filter_size, "", 1, 1, temp_stride);
+    conv2.set_name("conv2");
+    conv2.parameter<bool>("draw").set(false);
+    conv2.parameter<bool>("save_weights").set(true);
+    conv2.parameter<bool>("save_random_start").set(false);
+    conv2.parameter<bool>("log_spiking_neuron").set(false);
+    conv2.parameter<bool>("inhibition").set(true);
+    conv2.parameter<uint32_t>("epoch").set(100);
+    conv2.parameter<float>("annealing").set(0.97f);
+    conv2.parameter<float>("min_th").set(1.0f);
+    conv2.parameter<size_t>("max_train_spikes").set(2500);
+    conv2.parameter<float>("t_obj").set(t_obj2);
+    conv2.parameter<float>("lr_th").set(th_lr);
+    conv2.parameter<bool>("wta_infer").set(true);
+    conv2.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
+    conv2.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(20.0, 1.5);
+    conv2.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
+    conv2.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
+
+//    auto &pool2 = experiment.push<layer::Pooling3D>(2, 2, 1, 2, 2, 1);
+//    pool2.set_name("pool2");
+//
+//    auto &fc1 = experiment.push<layer::ConvolutionSampler3D>(256, 12, 17, tmp_filter_size, "", 1, 1, temp_stride);
+//    fc1.set_name("fc1");
+//    fc1.parameter<bool>("draw").set(false);
+//    fc1.parameter<bool>("save_weights").set(true);
+//    fc1.parameter<bool>("save_random_start").set(false);
+//    fc1.parameter<bool>("log_spiking_neuron").set(false);
+//    fc1.parameter<bool>("inhibition").set(true);
+//    fc1.parameter<uint32_t>("epoch").set(100);
+//    fc1.parameter<float>("annealing").set(0.97f);
+//    fc1.parameter<float>("min_th").set(1.0f);
+//    fc1.parameter<size_t>("max_train_spikes").set(2000);
+//    fc1.parameter<float>("t_obj").set(t_obj3);
+//    fc1.parameter<float>("lr_th").set(th_lr);
+//    fc1.parameter<bool>("wta_infer").set(true);
+//    fc1.parameter<Tensor<float>>("w").distribution<distribution::Uniform>(0.0, 1.0);
+//    fc1.parameter<Tensor<float>>("th").distribution<distribution::Gaussian>(15.0, 0.1);
+//    fc1.parameter<STDP>("stdp").set<stdp::Biological>(w_lr, 0.1f);
+//    fc1.parameter<Sampler>("sampler").set<sampler::RandomSampler3D>();
+
+
+    auto &conv1_out = experiment.output<TimeObjectiveOutput>(conv1, t_obj1);
+    conv1_out.add_postprocessing<process::SumPooling>(2, 2);
+    conv1_out.add_postprocessing<process::FeatureScaling>();
+    conv1_out.add_analysis<analysis::Activity>();
+    conv1_out.add_analysis<analysis::Coherence>();
+    conv1_out.add_analysis<analysis::Svm>();
+
+    auto &conv2_out = experiment.output<TimeObjectiveOutput>(conv2, t_obj2);
+    conv2_out.add_postprocessing<process::SumPooling>(2, 2);
+    conv2_out.add_postprocessing<process::FeatureScaling>();
+    conv2_out.add_analysis<analysis::Activity>();
+    conv2_out.add_analysis<analysis::Coherence>();
+    conv2_out.add_analysis<analysis::Svm>();
+
+//    auto &fc1_out = experiment.output<TimeObjectiveOutput>(fc1, t_obj3);
+//    fc1_out.add_postprocessing<process::FeatureScaling>();
+//    fc1_out.add_analysis<analysis::Activity>();
+//    fc1_out.template add_analysis<analysis::SvmQualitative>();
+
+
+    experiment.run(10000);
+
+    return experiment.wait();
+}

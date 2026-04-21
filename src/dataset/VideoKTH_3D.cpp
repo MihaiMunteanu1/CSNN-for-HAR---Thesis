@@ -393,8 +393,20 @@ std::pair<std::string, Tensor<InputType>> VideoKTH_3D::next()
 	_frame_number = 0;
 	int sz[3] = {_shape.dim(0), _shape.dim(1), _shape.dim(2)};
 
-	size_t _label = assign_label_to_sample(_current_video_name);
-	std::pair<std::string, Tensor<InputType>> out(std::to_string(static_cast<size_t>(_label)), _shape);
+	// Populate _label_count for internal use (kept for backward compatibility)
+	assign_label_to_sample(_current_video_name);
+
+	// Extract the action name (e.g. "boxing", "running") from the video path
+	// and use it as the sample label. Using readable class names instead of
+	// numeric indices makes downstream analysis (confusion matrix, qualitative
+	// per-video reports) human-friendly without extra mapping tables.
+	std::string _action_name;
+	{
+		std::string rel = _current_video_name.substr(_video_folder_path.length() + 1);
+		size_t slash = rel.find("/");
+		_action_name = (slash != std::string::npos) ? rel.substr(0, slash) : rel;
+	}
+	std::pair<std::string, Tensor<InputType>> out(_action_name, _shape);
 
 	// Get relative key for JSON lookup
 	std::string rel_key = get_relative_video_key(_current_video_name);

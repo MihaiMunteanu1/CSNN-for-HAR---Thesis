@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" confirmBeforeDeletion="false">
+  <component name="PublishConfigData" confirmBeforeUploading="false" confirmBeforeDeletion="false">
     <option name="confirmBeforeDeletion" value="false" />
+    <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="Remote Host (308c8ffa-fbda-4c06-95ae-c63252dfdf3a)">
         <serverdata>
@@ -16,7 +17,7 @@
       <paths name="Remote HostGRID (a42d171d-f7a2-4cb6-8bf6-347b7e1693c9)">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/mmuntean/csnn_simulator_v2" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/mmuntean/csnn_simulator_v3" local="$PROJECT_DIR$" web="/" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />

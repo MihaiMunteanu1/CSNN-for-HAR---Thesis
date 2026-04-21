@@ -25,7 +25,7 @@ Svm::Svm(const size_t &draw) : TwoPassAnalysis(_register),
 							   _correct_sample(0), _total_sample(0)
 {
 
-	add_parameter("c", _c, 1.0f);
+	add_parameter("c", _c, 10.0f); //1.0f
 
 	_problem.l = 0;
 	_problem.x = nullptr;
@@ -103,7 +103,6 @@ void Svm::process_train(const std::string& label, const Tensor<float>& sample) {
 
 void Svm::after_train() {
 	struct svm_parameter parameters;
-
 	parameters.svm_type = C_SVC;
 	parameters.kernel_type = LINEAR;
 	parameters.degree = 3;
@@ -111,7 +110,6 @@ void Svm::after_train() {
 	parameters.coef0 = 0;
 	parameters.nu = 0.5;
 	parameters.cache_size = 100;
-	parameters.C = _c;
 	parameters.eps = 1e-3;
 	parameters.p = 0.1;
 	parameters.shrinking = 1;
@@ -120,9 +118,54 @@ void Svm::after_train() {
 	parameters.weight_label = NULL;
 	parameters.weight = NULL;
 
+	// --- GRID SEARCH pe C cu 5-fold CV ---
+	const std::vector<double> C_grid = {0.01, 0.1, 1.0, 10.0, 100.0};
+	const int n_folds = 5;
+	double best_C = 1.0;
+	double best_acc = -1.0;
+
+	std::vector<double> target(_problem.l);
+	for (double C_try : C_grid) {
+		parameters.C = C_try;
+		::svm_cross_validation(&_problem, &parameters, n_folds, target.data());
+		int correct = 0;
+		for (int i = 0; i < _problem.l; i++)
+			if (target[i] == _problem.y[i]) correct++;
+		double acc = static_cast<double>(correct) / _problem.l;
+		experiment().print() << "  CV C=" << C_try << " -> " << (acc*100) << "%" << std::endl;
+		if (acc > best_acc) { best_acc = acc; best_C = C_try; }
+	}
+	experiment().print() << "Best C=" << best_C << " (CV acc " << (best_acc*100) << "%)" << std::endl;
+
+	// Antrenare finală cu best C pe tot train set-ul
+	parameters.C = best_C;
 	experiment().print() << "Train svm" << std::endl;
 	_model = ::svm_train(&_problem, &parameters);
 }
+
+
+//void Svm::after_train() {
+//	struct svm_parameter parameters;
+//
+//	parameters.svm_type = C_SVC;
+//	parameters.kernel_type = LINEAR;
+//	parameters.degree = 3;
+//	parameters.gamma = 1.0/static_cast<float>(_size);
+//	parameters.coef0 = 0;
+//	parameters.nu = 0.5;
+//	parameters.cache_size = 100;
+//	parameters.C = _c;
+//	parameters.eps = 1e-3;
+//	parameters.p = 0.1;
+//	parameters.shrinking = 1;
+//	parameters.probability = 0;
+//	parameters.nr_weight = 0;
+//	parameters.weight_label = NULL;
+//	parameters.weight = NULL;
+//
+//	experiment().print() << "Train svm" << std::endl;
+//	_model = ::svm_train(&_problem, &parameters);
+//}
 
 void Svm::before_test() {
 	_correct_sample = 0;
