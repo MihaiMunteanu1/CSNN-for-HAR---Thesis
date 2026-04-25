@@ -17,7 +17,7 @@
       <paths name="Remote HostGRID (a42d171d-f7a2-4cb6-8bf6-347b7e1693c9)">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/mmuntean/csnn_simulator_v3" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/mmuntean/csnn_simulator_v4" local="$PROJECT_DIR$" web="/" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />

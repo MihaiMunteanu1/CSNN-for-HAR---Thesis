@@ -30,7 +30,9 @@ ConvolutionSampler3D::ConvolutionSampler3D()
           _weights_loaded(false),
           _weights_saved(false),
           _max_train_spikes(0),
-          _epoch_counter(0)
+          _epoch_counter(0),
+          _fire_count_epoch(0),
+          _sample_count_epoch(0)
 {
     add_parameter("max_train_spikes", _max_train_spikes, static_cast<size_t>(0));
 }
@@ -53,7 +55,9 @@ ConvolutionSampler3D::ConvolutionSampler3D(size_t filter_number, size_t filter_w
           _weights_loaded(false),
           _weights_saved(false),
           _max_train_spikes(0),
-          _epoch_counter(0)
+          _epoch_counter(0),
+          _fire_count_epoch(0),
+          _sample_count_epoch(0)
 {
     add_parameter("max_train_spikes", _max_train_spikes, static_cast<size_t>(0));
 }
@@ -257,6 +261,7 @@ void ConvolutionSampler3D::train(const std::string &label,
     }
 
     _last_label = label;
+    _sample_count_epoch++;
 
     Tensor<float> &w  = parameter<Tensor<float>>("w").get();
     Tensor<float> &th = parameter<Tensor<float>>("th").get();
@@ -328,6 +333,8 @@ void ConvolutionSampler3D::train(const std::string &label,
         if (winner == std::numeric_limits<size_t>::max())
             continue;
 
+        _fire_count_epoch++;
+
         // Sequential threshold update across all filters.
         const float time_delta = lr_th * (spike.time - t_obj);
         const float loser_penalty = lr_th / static_cast<float>(D - 1);
@@ -338,25 +345,18 @@ void ConvolutionSampler3D::train(const std::string &label,
             if (th_data[z1] < min_th) th_data[z1] = min_th;
         }
 
-        // Parallel STDP weight update for the winning filter over
-        // (x, y, zi, k). Every write address (x, y, zi, winner, k) is unique.
-        const size_t total = Fw * Fh * Iz * Fcd;
-        std::vector<size_t> idx(total);
-        std::iota(idx.begin(), idx.end(), 0);
-
-        std::for_each(std::execution::par, idx.begin(), idx.end(),
-            [&](size_t flat) {
-                size_t k  = flat % Fcd;
-                size_t r1 = flat / Fcd;
-                size_t zi = r1 % Iz;
-                size_t r2 = r1 / Iz;
-                size_t y  = r2 % Fh;
-                size_t x  = r2 / Fh;
-                w.at(x, y, zi, winner, k) =
-                    stdp.process(w.at(x, y, zi, winner, k),
-                                 input_time.at(x, y, zi, k),
-                                 spike.time);
-            });
+        // Serial STDP weight update for the winning filter.
+        // 26K iterations of a lightweight exp() are faster serial than
+        // dispatched through TBB (parallel overhead + 208 KB heap alloc
+        // dominated total cost at this granularity).
+        const float post_t = spike.time;
+        for (size_t x = 0; x < Fw; ++x)
+            for (size_t y = 0; y < Fh; ++y)
+                for (size_t zi = 0; zi < Iz; ++zi)
+                    for (size_t k = 0; k < Fcd; ++k) {
+                        float &wref = w.at(x, y, zi, winner, k);
+                        wref = stdp.process(wref, input_time.at(x, y, zi, k), post_t);
+                    }
 
         if (inhibition)
             return; // WTA: stop processing this sample after first fire.
@@ -369,7 +369,15 @@ void ConvolutionSampler3D::on_epoch_end()
 
     _epoch_counter++;
     uint32_t total = parameter<uint32_t>("epoch").get();
-    std::cout << "\n[" << name() << "] Epoch " << _epoch_counter << "/" << total << std::endl;
+    double fps = _sample_count_epoch > 0
+                 ? static_cast<double>(_fire_count_epoch) / _sample_count_epoch
+                 : 0.0;
+    std::cout << "\n[" << name() << "] Epoch " << _epoch_counter << "/" << total
+              << "  samples=" << _sample_count_epoch
+              << "  fires=" << _fire_count_epoch
+              << "  fires/sample=" << fps << std::endl;
+    _fire_count_epoch = 0;
+    _sample_count_epoch = 0;
 
     // Persist weights at the end of every epoch (cheap, overwrites).
     // The file always reflects the latest epoch when training finishes.

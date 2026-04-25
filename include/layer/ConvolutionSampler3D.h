@@ -85,6 +85,10 @@ namespace layer {
         size_t _max_train_spikes;
         size_t _epoch_counter;
 
+        // Per-epoch activity counters (reset in on_epoch_end).
+        size_t _fire_count_epoch;
+        size_t _sample_count_epoch;
+
         void ensure_state_allocated();
         void try_load_weights(const std::string &label);
         void try_save_weights(const std::string &label);

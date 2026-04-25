@@ -545,18 +545,18 @@ def process_dataset(input_path, split, hog, args):
                 "groups": groups
             }
 
-            if args.preview_dir and previews_saved_for_action < args.preview_videos_per_action:
-                save_preview_images(
-                    video_path=video_path,
-                    groups=groups,
-                    action=action,
-                    video_name=video_name,
-                    out_dir=os.path.join(args.preview_dir, split),
-                    frame_width=args.frame_width,
-                    frame_height=args.frame_height,
-                    num_previews=args.preview_groups_per_video
-                )
-                previews_saved_for_action += 1
+            # if args.preview_dir and previews_saved_for_action < args.preview_videos_per_action:
+            #     save_preview_images(
+            #         video_path=video_path,
+            #         groups=groups,
+            #         action=action,
+            #         video_name=video_name,
+            #         out_dir=os.path.join(args.preview_dir, split),
+            #         frame_width=args.frame_width,
+            #         frame_height=args.frame_height,
+            #         num_previews=args.preview_groups_per_video
+            #     )
+            #     previews_saved_for_action += 1
 
         action_videos = len([k for k in results if k.startswith(f"{split}/{action}/")])
         print(f"    Done: {len(videos)} videos, {action_videos} with valid groups")
@@ -567,13 +567,18 @@ def process_dataset(input_path, split, hog, args):
 def build_parser():
     p = argparse.ArgumentParser("KTH HOG bbox extractor")
 
-
+    p.add_argument(
+        "--input_path",
+        type=str,
+        default="",
+        help="Path to organized KTH dataset root (must contain train/ and test/)"
+    )
     p.add_argument("--temporal_kernel", type=int, default=7) #sau un 15
     p.add_argument("--num_groups", type=int, default=10)
     p.add_argument("--frame_gap", type=int, default=2)
 
-    p.add_argument("--frame_width", type=int, default=80) #80, 160
-    p.add_argument("--frame_height", type=int, default=60) #60, 120
+    p.add_argument("--frame_width", type=int, default=80)
+    p.add_argument("--frame_height", type=int, default=60)
 
     p.add_argument("--hit_threshold", type=float, default=-0.75)
     p.add_argument("--mog2_fallback", action="store_true", default=True)
@@ -602,15 +607,16 @@ def main():
     hog = cv2.HOGDescriptor()
     hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-    args.input_path ="/home/mihai/kth_organized/" #os.getenv("INPUT_PATH")
+    # args.input_path ="/home/mihai/kth_organized/" #os.getenv("INPUT_PATH")
     #"/home/mihai/kth_organized/"
+    args.input_path = "/home/mmuntean/kth_organized/"
     if not args.input_path:
         print("ERROR: INPUT_PATH environment variable not set!")
         raise SystemExit(1)
 
-    args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + "_v2.json"
+    args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + ".json"
 
-    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel) +"_v2"
+    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel) +""
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     os.makedirs(args.preview_dir, exist_ok=True)

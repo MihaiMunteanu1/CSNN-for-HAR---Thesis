@@ -131,7 +131,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # --- Optimizări globale, doar pe Release ---
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG") #for roazhon-13
+#set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=x86-64-v3 -DNDEBUG")
 
 # --- (2) LTO global (gestionează corect compile + link) ---
 include(CheckIPOSupported)
