@@ -104,10 +104,16 @@ class HOGDataset(Dataset):
     """
     HOG features dataset for KTH.
 
+    Supports two input formats, auto-detected by file extension:
+      - ".json" : bbox metadata only — HOG is recomputed at load time from
+                  the videos under `video_root` (slow first run).
+      - ".npz"  : pre-computed augmented HOG features produced by
+                  `extract_hog_augmented.py` (fast, includes augmentation).
+
     Args:
-        json_path: path to hog_person_data_*.json
+        data_path: path to .json (bbox-only) or .npz (pre-computed) file.
         split: "train" or "test"
-        video_root: path containing the KTH video files
+        video_root: path containing the KTH video files (only used for .json).
         transform: optional callable applied to feature tensor
         as_image: if True, returns tensor of shape (T, C=36, H=15, W=7)
                   for CNN/temporal models. If False (default), returns
@@ -135,6 +141,14 @@ class HOGDataset(Dataset):
         self.metadata = []  # parallel list with one dict per sample
 
         print(f"Loading HOG data from {json_path} for {split} split...")
+        if str(json_path).endswith(".npz"):
+            self._load_npz(json_path)
+        else:
+            self._load_json(json_path, video_root)
+
+        print(f"Loaded {len(self.samples)} {split} samples.")
+
+    def _load_json(self, json_path, video_root):
         with open(json_path, "r") as f:
             data = json.load(f)
 
@@ -146,9 +160,9 @@ class HOGDataset(Dataset):
             subject, action = parse_kth_filename(video_key)
             if subject is None:
                 continue
-            if split == "train" and subject not in TRAIN_SUBJECTS:
+            if self.split == "train" and subject not in TRAIN_SUBJECTS:
                 continue
-            if split == "test" and subject not in TEST_SUBJECTS:
+            if self.split == "test" and subject not in TEST_SUBJECTS:
                 continue
 
             label_idx = CLASS_TO_IDX[action]
@@ -185,7 +199,31 @@ class HOGDataset(Dataset):
                     "frame_indices": [int(group[fi]["frame_idx"]) for fi in range(T)],
                 })
 
-        print(f"Loaded {len(self.samples)} {split} samples.")
+    def _load_npz(self, npz_path):
+        # allow_pickle is required because metadata is an object array of dicts.
+        data = np.load(npz_path, allow_pickle=True)
+        features = data["features"]      # (N, T*3780) float32
+        bboxes = data["bboxes"]          # (N, T, 4) float32
+        labels = data["labels"]          # (N,) int64
+        all_meta = data["metadata"].tolist()
+
+        for i in range(features.shape[0]):
+            meta = all_meta[i] if i < len(all_meta) else {}
+            sample_split = meta.get("split")
+            if sample_split is None:
+                subject = meta.get("subject")
+                if subject is None:
+                    continue
+                sample_split = "train" if subject in TRAIN_SUBJECTS else "test"
+            if sample_split != self.split:
+                continue
+
+            self.samples.append((
+                torch.from_numpy(features[i].astype(np.float32, copy=False)),
+                torch.from_numpy(bboxes[i].astype(np.float32, copy=False)),
+                int(labels[i]),
+            ))
+            self.metadata.append(meta)
 
     def __len__(self):
         return len(self.samples)

@@ -42,7 +42,7 @@ def expand_globs(patterns: List[str]) -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="../hog/hog_person_data_new_7.json")
+    parser.add_argument("--data_path", type=str, default="../hog/hog_aug_7.npz")
     parser.add_argument("--model_type", type=str, default="conv3d",
                         choices=["mlp", "cnn", "temporal", "conv3d"])
     parser.add_argument("--checkpoints", type=str, nargs="+", required=True,

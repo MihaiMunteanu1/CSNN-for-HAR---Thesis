@@ -23,10 +23,29 @@ import torch
 from dataset import HOGDataset, KTH_CLASSES
 from model import build_model
 
+# A.
+# for s in 0 1 2 3 4; do
+# python3 train.py --data_path ../hog/hog_aug_7.npz \
+#         --seed $s --save_suffix _aug_s$s
+# done
+# python3 eval_ensemble.py \
+#         --data_path ../hog/hog_aug_7.npz \
+#         --checkpoints "models/har_conv3d_aug_s*.pth"
 
-DATA_PATH = "../hog/hog_person_data_new_7.json"
+# B. App-ul Streamlit
+# pip install streamlit
+# streamlit run app.py
+# Deschide URL-ul afișat (de obicei http://localhost:8501). Pentru acces extern de pe alt PC:
+# streamlit run app.py --server.address 0.0.0.0 --server.port 8501#
+# Apoi accesezi prin http://<gcp-vm-external-ip>:8501 (verifică firewall-ul pe GCP).
+
+# python3 -m streamlit run app.py
+
+
+DATA_PATH = "../hog/hog_aug_7.npz"
 MODEL_DIR = "models"
-VIDEO_ROOT = "/home/mmuntean/kth_organized"
+# VIDEO_ROOT = "/home/mmuntean/kth_organized"
+VIDEO_ROOT = "C:/Users/munte/Downloads/kth_organized"
 
 KTH_DISPLAY = {
     "boxing":       "🥊 Boxing",
@@ -113,7 +132,7 @@ if not ckpts:
     st.error(
         f"Nu există checkpoint-uri la `{ckpt_pattern}`. "
         "Antrenează modelul întâi:\n\n"
-        "```\npython3 train.py --data_path ../hog/hog_person_data_new_7.json\n```"
+        "```\npython3 train.py --data_path ../hog/hog_aug_7.npz\n```"
     )
     st.stop()
 

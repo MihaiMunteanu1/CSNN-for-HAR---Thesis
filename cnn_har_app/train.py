@@ -178,7 +178,7 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="../hog/hog_person_data_new_7.json")
+    parser.add_argument("--data_path", type=str, default="../hog/hog_aug.npz")
     parser.add_argument("--model_type", type=str, default="conv3d",
                         choices=["mlp", "cnn", "temporal", "conv3d"])
     parser.add_argument("--batch_size", type=int, default=64)
