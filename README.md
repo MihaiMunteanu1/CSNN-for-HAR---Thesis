@@ -31,17 +31,26 @@ Provide implementation of experiments described in:
 ## Installation
 
 ### Dependencies
-```
+
+For a standard Ubuntu environment, you can install the required dependencies using the following commands:
+```bash
 sudo apt update
 sudo apt install --yes gcc g++ make cmake libatlas-base-dev libblas-dev libopenblas-dev liblapack-dev liblapacke-dev libopencv-dev python3-opencv
 sudo add-apt-repository ppa:rock-core/qt4 && sudo apt install qt4-default
 ```
-### Compile
+
+For Grid'5000 environments, use the following commands:
+```bash
+sudo-g5k apt-get update
+sudo-g5k apt-get install -y libopencv-dev liblapacke-dev liblapack-dev libblas-dev libopenblas-dev
 ```
+
+### Compile
+```bash
 mkdir csnn-simulator-build
 cd csnn-simulator-build
-cmake ../../csnn-simulator -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSE_GUI=NO
-make
+cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSE_GUI=NO
+make -j$(nproc)
 ```
 
 ## Usage
@@ -49,3 +58,28 @@ Run MNIST Example:
 ```
 export INPUT_PATH=/path/to/mnist/
 ./Mnist
+```
+
+## HAR on KTH Dataset
+
+For running Human Action Recognition (HAR) on the KTH dataset, you need to follow these steps:
+
+### 1. Preprocessing
+
+The preprocessing stage involves extracting bounding boxes for the person in each frame and then extracting the frames themselves into a format suitable for the simulator.
+
+First, you need to extract the bounding boxes from the KTH dataset videos. This script uses a combination of HOG and MOG2 detectors to identify the person in each frame and saves the bounding box information to a JSON file. Run the following command from the project root:
+
+```bash
+python3 src/tool/extract_bboxes_kth.py
+```
+
+Next, extract the full frames from the videos. This script reads the JSON file generated in the previous step and creates a `.npy` file containing the video frames and a corresponding `.json` file with metadata, including the bounding boxes for each frame.
+
+```bash
+python3 src/tool/extract_full_frames_kth.py
+```
+
+### 2. Running Experiments with Optuna
+
+Once the data is preprocessed, you can run the hyperparameter optimization experiments using Optuna. The specific commands to run the Optuna experiments will depend on your experiment setup. Please refer to the relevant experiment files for detailed instructions on how to launch the Optuna studies.
