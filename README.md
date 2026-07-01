@@ -83,3 +83,16 @@ python3 src/tool/extract_full_frames_kth.py
 ### 2. Running Experiments with Optuna
 
 Once the data is preprocessed, you can run the hyperparameter optimization experiments using Optuna. The specific commands to run the Optuna experiments will depend on your experiment setup. Please refer to the relevant experiment files for detailed instructions on how to launch the Optuna studies.
+
+### Relevant Files for KTH HAR
+
+The following files represent my contributions to the project for the Human Action Recognition functionality on the KTH dataset:
+
+*   `apps/kth/`: This directory contains the main application files for running the KTH experiments.
+*   `src/dataset/VideoKTH3D.cpp`: This class is responsible for loading and managing the KTH video data.
+*   `dataset/KTH_Formatter.py`: A Python script for formatting the KTH dataset.
+*   `src/sampler/HOGSampler3D.cpp`: This sampler is used to extract 3D patches from the video data, guided by the HOG detector's bounding boxes.
+*   `src/layer/ConvolutionSampler3D.cpp`: This layer performs 3D convolution on the sampled data.
+*   `optuna/`: This directory contains the scripts and configurations for running hyperparameter optimization with Optuna.
+*   `src/tool/extract_bboxes_kth.py`: The script for extracting person bounding boxes from the KTH videos.
+*   `src/tool/extract_full_frames_kth.py`: The script for extracting full frames and generating the final `.npy` and `.json` files.
