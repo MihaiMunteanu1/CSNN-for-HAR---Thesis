@@ -3,7 +3,6 @@
 
 #include "Stdp.h"
 #include "Layer.h"
-#include "Sampler.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -159,8 +158,6 @@ namespace layer
 		Tensor<float> _th;
 		// spike time dependent plasticity - the learning rule used
 		STDP *_stdp;
-		// patch sampling strategy
-		Sampler *_sampler;
 		// input_depth example RGB images have a depth of 3 while greyscale have a depth of 1.
 		size_t _input_depth;
 		// In case of 3D data, this indocates the time dimention.

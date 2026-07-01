@@ -1,200 +1,121 @@
 """
-KTH Dataset Formatter for CSNN Simulator
+Reorganize kth_organized/{train,test}/<action>/ into the standard
+8/8/9 train/val/test split used by the original KTH protocol.
 
-This script organizes raw KTH action recognition dataset videos into the
-folder structure expected by the dataset::Video class in the simulator.
+Splits (by subject id):
+  train : 11, 12, 13, 14, 15, 16, 17, 18                    (8 subjects)
+  val   : 19, 20, 21, 23, 24, 25, 01, 04                    (8 subjects)
+  test  : 02, 03, 05, 06, 07, 08, 09, 10, 22                (9 subjects)
 
-Expected raw KTH naming: person01_boxing_d1_uncomp.avi
-                         person{NN}_{action}_{scenario}_uncomp.avi
-
-Output structure:
-    output_dir/
-    ├── train/
-    │   ├── boxing/
-    │   ├── handclapping/
-    │   ├── handwaving/
-    │   ├── jogging/
-    │   ├── running/
-    │   └── walking/
-    └── test/
-        ├── boxing/
-        ├── handclapping/
-        ├── handwaving/
-        ├── jogging/
-        ├── running/
-        └── walking/
-
-Usage:
-    python KTH_Formatter.py --input <raw_kth_folder> --output <output_folder>
-
-Train/Test split (standard KTH protocol):
-    - Train: subjects 01-16
-    - Test:  subjects 17-25
+The script does NOT modify the input folder. It writes a brand new tree:
+  <output>/train/<action>/<video>.avi
+  <output>/val/<action>/<video>.avi
+  <output>/test/<action>/<video>.avi
 """
 
-import os
-import sys
-import shutil
 import argparse
 import re
-
-# KTH action classes (6 classes)
-KTH_ACTIONS = ["boxing", "handclapping", "handwaving", "jogging", "running", "walking"]
-
-# Standard KTH train/test split by subject number
-TRAIN_SUBJECTS = list(range(1, 17))   # subjects 01-16
-TEST_SUBJECTS = list(range(17, 26))   # subjects 17-25
+import shutil
+import sys
+from collections import Counter
+from pathlib import Path
 
 
-def parse_kth_filename(filename):
-    """
-    Parse a KTH video filename to extract subject number and action.
-    
-    Expected format: person{NN}_{action}_{scenario}_uncomp.avi
-    Examples:
-        person01_boxing_d1_uncomp.avi
-        person12_handclapping_d2_uncomp.avi
-    
-    Returns:
-        (subject_number: int, action: str) or None if parsing fails
-    """
-    match = re.match(r'person(\d+)_(\w+?)_d\d+_uncomp\.avi', filename, re.IGNORECASE)
-    if match:
-        subject = int(match.group(1))
-        action = match.group(2).lower()
-        return subject, action
+TRAIN_SUBJECTS = {11, 12, 13, 14, 15, 16, 17, 18}
+VAL_SUBJECTS   = {19, 20, 21, 23, 24, 25,  1,  4}
+TEST_SUBJECTS  = { 2,  3,  5,  6,  7,  8,  9, 10, 22}
 
-    match = re.match(r'person(\d+)_(\w+?)_d\d+\.avi', filename, re.IGNORECASE)
-    if match:
-        subject = int(match.group(1))
-        action = match.group(2).lower()
-        return subject, action
+KTH_CLASSES = ["boxing", "handclapping", "handwaving", "jogging", "running", "walking"]
 
-    match = re.match(r'person(\d+)_(\w+)', filename, re.IGNORECASE)
-    if match:
-        subject = int(match.group(1))
-        remaining = match.group(2).lower()
-        for action in KTH_ACTIONS:
-            if remaining.startswith(action):
-                return subject, action
 
+def split_for_subject(subj):
+    if subj in TRAIN_SUBJECTS: return "train"
+    if subj in VAL_SUBJECTS:   return "val"
+    if subj in TEST_SUBJECTS:  return "test"
     return None
 
 
-def organize_kth_dataset(input_dir, output_dir, copy_mode="copy"):
-    """
-    Organize raw KTH videos into train/test folder structure.
-    
-    Args:
-        input_dir: Path to raw KTH videos (can be flat or organized by action)
-        output_dir: Path to output directory
-        copy_mode: "copy" to copy files, "symlink" to create symbolic links
-    """
-    for split in ["train", "test"]:
-        for action in KTH_ACTIONS:
-            os.makedirs(os.path.join(output_dir, split, action), exist_ok=True)
-
-    video_files = []
-    for root, dirs, files in os.walk(input_dir):
-        for f in files:
-            if f.lower().endswith('.avi'):
-                video_files.append(os.path.join(root, f))
-
-    if not video_files:
-        print(f"ERROR: No .avi video files found in '{input_dir}'")
-        print("Make sure the KTH dataset videos are in the input directory.")
-        sys.exit(1)
-
-    print(f"Found {len(video_files)} video files in '{input_dir}'")
-
-    stats = {"train": {a: 0 for a in KTH_ACTIONS}, "test": {a: 0 for a in KTH_ACTIONS}}
-    skipped = []
-
-    for video_path in sorted(video_files):
-        filename = os.path.basename(video_path)
-        result = parse_kth_filename(filename)
-
-        if result is None:
-            skipped.append(filename)
-            continue
-
-        subject, action = result
-
-        if action not in KTH_ACTIONS:
-            skipped.append(filename)
-            continue
-
-        if subject in TRAIN_SUBJECTS:
-            split = "train"
-        elif subject in TEST_SUBJECTS:
-            split = "test"
-        else:
-            skipped.append(filename)
-            continue
-
-        dest_path = os.path.join(output_dir, split, action, filename)
-
-        if not os.path.exists(dest_path):
-            if copy_mode == "symlink":
-                os.symlink(os.path.abspath(video_path), dest_path)
-            else:
-                shutil.copy2(video_path, dest_path)
-
-        stats[split][action] += 1
-
-    print("\n" + "=" * 60)
-    print("KTH Dataset Organization Summary")
-    print("=" * 60)
-    
-    for split in ["train", "test"]:
-        total = sum(stats[split].values())
-        print(f"\n{split.upper()} set ({total} videos):")
-        for action in KTH_ACTIONS:
-            print(f"  {action:15s}: {stats[split][action]:4d} videos")
-
-    if skipped:
-        print(f"\nSkipped {len(skipped)} files (could not parse):")
-        for s in skipped[:10]:
-            print(f"  - {s}")
-        if len(skipped) > 10:
-            print(f"  ... and {len(skipped) - 10} more")
-
-    total_organized = sum(sum(stats[s].values()) for s in ["train", "test"])
-    print(f"\nTotal organized: {total_organized} videos")
-    print(f"Output directory: {output_dir}")
-    print("\nTo run the KTH experiment:")
-    print(f'  export INPUT_PATH="{os.path.abspath(output_dir)}/"')
+def parse_subject(filename):
+    m = re.match(r"person(\d+)_", filename, re.IGNORECASE)
+    return int(m.group(1)) if m else None
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Organize raw KTH dataset videos into train/test folder structure for CSNN Simulator"
-    )
-    parser.add_argument(
-        "--input", "-i",
-        required=True,
-        help="Path to raw KTH video files (can be flat directory or organized by action)"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        required=True,
-        help="Path to output directory (will be created if it doesn't exist)"
-    )
-    parser.add_argument(
-        "--mode", "-m",
-        choices=["copy", "symlink"],
-        default="copy",
-        help="File transfer mode: 'copy' (default) or 'symlink'"
-    )
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
 
-    if not os.path.isdir(args.input):
-        print(f"ERROR: Input directory '{args.input}' does not exist.")
-        sys.exit(1)
+    src = Path(args.input).expanduser().resolve()
+    dst = Path(args.output).expanduser().resolve()
 
-    organize_kth_dataset(args.input, args.output, args.mode)
+    if not src.is_dir():
+        sys.exit(f"Input folder does not exist: {src}")
+    if dst == src:
+        sys.exit("Output must differ from input.")
+
+    union = TRAIN_SUBJECTS | VAL_SUBJECTS | TEST_SUBJECTS
+    assert union == set(range(1, 26)), f"Splits miss subjects: {set(range(1,26)) - union}"
+    assert not (TRAIN_SUBJECTS & VAL_SUBJECTS), "train/val overlap"
+    assert not (TRAIN_SUBJECTS & TEST_SUBJECTS), "train/test overlap"
+    assert not (VAL_SUBJECTS   & TEST_SUBJECTS), "val/test overlap"
+
+    print(f"Input  : {src}")
+    print(f"Output : {dst}")
+    print(f"Mode   : {'DRY RUN' if args.dry_run else 'COPY (real files)'}")
+    print()
+
+    counts = Counter()
+    missing = Counter()
+    skipped = 0
+
+    for top in src.iterdir():
+        if not top.is_dir() or top.name not in ("train", "test"):
+            continue
+        for action_dir in top.iterdir():
+            if not action_dir.is_dir():
+                continue
+            action = action_dir.name
+            if action not in KTH_CLASSES:
+                print(f"  WARN: unknown action folder {action_dir}", file=sys.stderr)
+                continue
+            for video in sorted(action_dir.iterdir()):
+                if not video.is_file():
+                    continue
+                subj = parse_subject(video.name)
+                if subj is None:
+                    missing["unparseable"] += 1
+                    print(f"  WARN: cannot parse subject from {video.name}", file=sys.stderr)
+                    continue
+                split = split_for_subject(subj)
+                if split is None:
+                    missing[f"subject_{subj}"] += 1
+                    continue
+
+                out_path = dst / split / action / video.name
+                counts[split] += 1
+
+                if args.dry_run:
+                    continue
+
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if out_path.exists() and out_path.stat().st_size == video.stat().st_size:
+                    skipped += 1
+                    continue
+                shutil.copy2(video, out_path)
+
+    print("Summary:")
+    for split in ("train", "val", "test"):
+        print(f"  {split:5s} : {counts[split]:4d} videos")
+    print(f"  total : {sum(counts.values())} videos")
+    if skipped:
+        print(f"  (skipped {skipped} that already existed at destination)")
+    if missing:
+        print(f"  WARN missing: {dict(missing)}")
+    print("Done.")
 
 
 if __name__ == "__main__":
     main()
+

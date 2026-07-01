@@ -1,4 +1,5 @@
 #include "layer/ConvolutionSampler3D.h"
+#include "Experiment.h"
 #include "Stdp.h"
 #include "tool/Operations.h"
 
@@ -16,11 +17,11 @@
 
 using namespace layer;
 
-// Register this layer type so it can be created/configured like other layers.
 static RegisterClassParameter<ConvolutionSampler3D, LayerFactory> _register("ConvolutionSampler3D");
 
 ConvolutionSampler3D::ConvolutionSampler3D()
         : Convolution3D(),
+          _sampler(nullptr),
           _a_local(),
           _inh_local(),
           _input_depth_local(0),
@@ -34,6 +35,7 @@ ConvolutionSampler3D::ConvolutionSampler3D()
           _fire_count_epoch(0),
           _sample_count_epoch(0)
 {
+    add_parameter("sampler", _sampler);
     add_parameter("max_train_spikes", _max_train_spikes, static_cast<size_t>(0));
 }
 
@@ -41,11 +43,10 @@ ConvolutionSampler3D::ConvolutionSampler3D(size_t filter_number, size_t filter_w
                                            std::string model_path,
                                            size_t stride_x, size_t stride_y, size_t stride_k,
                                            size_t padding_x, size_t padding_y, size_t padding_k)
-        // NOTE: base Convolution3D ctor signature is
-        //   (filter_width, filter_height, filter_depth, filter_number, model_path, ...)
-        // while OUR wrapper takes filter_number FIRST. Forward in base order.
+
         : Convolution3D(filter_width, filter_height, filter_depth, filter_number, model_path,
                         stride_x, stride_y, stride_k, padding_x, padding_y, padding_k),
+          _sampler(nullptr),
           _a_local(),
           _inh_local(),
           _input_depth_local(0),
@@ -59,19 +60,18 @@ ConvolutionSampler3D::ConvolutionSampler3D(size_t filter_number, size_t filter_w
           _fire_count_epoch(0),
           _sample_count_epoch(0)
 {
+    add_parameter("sampler", _sampler);
     add_parameter("max_train_spikes", _max_train_spikes, static_cast<size_t>(0));
 }
 
 Shape ConvolutionSampler3D::compute_shape(const Shape &previous_shape)
 {
-    // Let the base class do its work (sets _width, _height, _depth, _conv_depth,
-    // and shapes the "w" / "th" parameter tensors).
+
     Shape out = Convolution3D::compute_shape(previous_shape);
 
     _input_depth_local      = previous_shape.dim(2);
     _input_conv_depth_local = previous_shape.number() > 3 ? previous_shape.dim(3) : 1;
 
-    // Allocate parallel-safe state owned by THIS class.
     _a_local   = Tensor<float>(Shape({width(), height(), depth(), conv_depth()}));
     _inh_local = Tensor<bool>(Shape({width(), height(), depth(), conv_depth()}));
 
@@ -81,12 +81,6 @@ Shape ConvolutionSampler3D::compute_shape(const Shape &previous_shape)
         _num_threads = (hc == 0) ? 1u : static_cast<size_t>(hc);
     }
 
-    // When weights are pre-loaded, training is a no-op (train() returns
-    // immediately).  But the framework still runs _epoch_number training
-    // passes — loading every video from disk, preprocessing, extracting a
-    // patch, converting to spikes — only to throw the result away.
-    // Setting epoch to 0 makes train_pass_number() return 1 (one inference
-    // pass, zero training passes), eliminating all that wasted I/O.
     if (!_model_path_local.empty())
     {
         parameter<uint32_t>("epoch").set(0);
@@ -98,16 +92,86 @@ Shape ConvolutionSampler3D::compute_shape(const Shape &previous_shape)
     return out;
 }
 
+
+// Mirrors Convolution3D::process_train_sample, but instead of drawing a plain
+// uniform-random patch it asks the injected Sampler for the patch location.
+// This keeps the sampling strategy (HOG / Random / ...) attached to this
+// class while the base Convolution3D stays sampler-agnostic.
+//
+// The train()/test() calls below are virtual, so they dispatch to this
+// class' parallel overrides.
 // ---------------------------------------------------------------------------
-// Save / Load helpers
-// ---------------------------------------------------------------------------
-// Replicates the bits of _priv::Convolution3DImpl::train that handle weight
-// persistence (save at end-of-training, load from JSON if model_path nonempty).
-// Path layout matches the base class:
-//   <cwd>/Weights/<exp_name>/<layerIndex>/<exp_name>.json
-// where exp_name and layerIndex are parsed out of the framework label
-// "<exp>;.<layerIndex>;.<rest>".
-// ---------------------------------------------------------------------------
+void ConvolutionSampler3D::process_train_sample(const std::string &label, Tensor<float> &sample,
+                                                size_t current_pass, size_t current_index, size_t number)
+{
+    const uint32_t epoch_number = parameter<uint32_t>("epoch").get();
+
+    if (current_index == 0)
+    {
+        if (current_pass < epoch_number)
+        {
+            _current_width = 1;
+            _current_height = 1;
+            _current_conv_depth = 1;
+            std::cout << "\rEpoch " << current_pass << "/" << epoch_number;
+
+            on_epoch_start();
+        }
+        else
+        {
+            _current_width = _width;
+            _current_height = _height;
+            _current_conv_depth = _conv_depth;
+            std::cout << std::endl
+                      << "Process train set" << std::endl;
+        }
+    }
+
+    std::vector<Spike> input_spike;
+    std::vector<Spike> output_spike;
+
+    if (current_pass < epoch_number)
+    {
+        Patch3D patch = _sampler->sample(sample, _width, _height, _conv_depth,
+                                         _filter_width, _filter_height, _filter_conv_depth,
+                                         current_index, experiment()->random_generator());
+        size_t x = patch.x;
+        size_t y = patch.y;
+        size_t k = patch.k;
+
+        Tensor<Time> input_time(Shape({_filter_width, _filter_height, _input_depth_local, _filter_conv_depth}));
+        for (size_t cx = 0; cx < _filter_width; cx++)
+        {
+            for (size_t cy = 0; cy < _filter_height; cy++)
+            {
+                for (size_t cz = 0; cz < _input_depth_local; cz++)
+                {
+                    for (size_t ck = 0; ck < _filter_conv_depth; ck++)
+                    {
+                        input_time.at(cx, cy, cz, ck) = sample.at(cx + x, cy + y, cz, ck + k);
+                    }
+                }
+            }
+        }
+
+        SpikeConverter::to_spike(input_time, input_spike);
+        train(label, input_spike, input_time, output_spike);
+    }
+    else
+    {
+        SpikeConverter::to_spike(sample, input_spike);
+        test(label, input_spike, sample, output_spike);
+        sample = Tensor<float>(shape());
+        SpikeConverter::from_spike(output_spike, sample);
+    }
+
+    if (current_index == number - 1 && current_pass < epoch_number)
+    {
+        on_epoch_end();
+    }
+}
+
+
 static bool parse_label(const std::string &label,
                         std::string &exp_name, std::string &layer_index)
 {
@@ -130,8 +194,7 @@ void ConvolutionSampler3D::try_load_weights(const std::string &label)
     std::string exp_name, layer_index;
     if (!parse_label(label, exp_name, layer_index)) return;
 
-    // The same label-stripping the base does, so LoadWeights gets the bare
-    // class label.
+
     std::string bare = label;
     bare.erase(0, exp_name.size() + 2);
     bare.erase(0, layer_index.size() + 2);
@@ -216,7 +279,6 @@ void ConvolutionSampler3D::try_save_weights(const std::string &label)
 
 void ConvolutionSampler3D::ensure_state_allocated()
 {
-    // Defensive: in case compute_shape wasn't called (shouldn't happen).
     if (_a_local.shape().product() == 0)
     {
         _a_local   = Tensor<float>(Shape({width(), height(), depth(), conv_depth()}));
@@ -229,15 +291,11 @@ void ConvolutionSampler3D::ensure_state_allocated()
     }
 }
 
-// ---------------------------------------------------------------------------
-// TRAIN
-// ---------------------------------------------------------------------------
-//
+
 // Training is fundamentally sequential per sample because of WTA + threshold
 // updates that touch all filters. We keep the spike loop sequential, but for
 // each spike we parallelize the per-filter accumulator update across z, then
-// pick the smallest z that crossed (matching the original semantics where
-// `for z=0..depth: if cross then return` selected the smallest index winner).
+// pick the smallest z that crossed
 // When a winner fires, we sequentially update all thresholds (touches all z)
 // and then parallelize the STDP weight update for that single winning z over
 // (x, y, zi, k) — every write hits a unique tensor index, so it's race-free.
@@ -251,9 +309,6 @@ void ConvolutionSampler3D::train(const std::string &label,
 
     ensure_state_allocated();
 
-    // If a model_path was provided, load once and skip training entirely.
-    // The framework will keep calling train() for every (epoch, sample) but
-    // we just no-op so the pre-trained weights are preserved.
     if (!_model_path_local.empty())
     {
         try_load_weights(label);
@@ -278,21 +333,13 @@ void ConvolutionSampler3D::train(const std::string &label,
     const size_t Fcd  = _filter_conv_depth;
     const size_t Iz   = _input_depth_local;
 
-    // ---- #5: Spike top-K limit ----
-    // input_spike is sorted by time (earliest = most important in latency
-    // coding). Capping the count keeps the most informative spikes and
-    // reduces the O(S × D) hotpath for deeper layers where channel count
-    // (and thus spike count) explodes.
+
     const size_t spike_count =
         (_max_train_spikes > 0 && input_spike.size() > _max_train_spikes)
             ? _max_train_spikes
             : input_spike.size();
 
-    // ---- #4: Contiguous accumulator + raw-pointer striding ----
-    // Instead of the strided _a_local.at(0,0,z,0) calls (each going
-    // through variadic template expansion + debug asserts), we use a
-    // contiguous float array. th is already 1D (shape D), contiguous.
-    // Weight stride between consecutive z values = Fcd.
+
     alignas(64) float accum[512];
     std::vector<float> accum_heap;
     float *acc;
@@ -310,16 +357,14 @@ void ConvolutionSampler3D::train(const std::string &label,
     {
         const Spike &spike = input_spike[s];
 
-        // Raw pointer to w(spike.x, spike.y, spike.z, 0, spike.k).
-        // Consecutive z values sit at stride Fcd apart.
+        // Raw pointer to w(spike.x, spike.y, spike.z, 0, spike.k)
         const float *w_ptr = w.ptr(spike.x, spike.y, spike.z,
                                     static_cast<size_t>(0), spike.k);
 
-        // Accumulate — acc is contiguous, w_ptr is strided by Fcd.
         for (size_t z = 0; z < D; ++z)
             acc[z] += w_ptr[z * Fcd];
 
-        // Find smallest z that crossed threshold.
+        // Find smallest z that crossed threshold
         size_t winner = std::numeric_limits<size_t>::max();
         for (size_t z = 0; z < D; ++z)
         {
@@ -335,7 +380,7 @@ void ConvolutionSampler3D::train(const std::string &label,
 
         _fire_count_epoch++;
 
-        // Sequential threshold update across all filters.
+        // Sequential threshold update across all filters
         const float time_delta = lr_th * (spike.time - t_obj);
         const float loser_penalty = lr_th / static_cast<float>(D - 1);
         for (size_t z1 = 0; z1 < D; ++z1)
@@ -345,10 +390,7 @@ void ConvolutionSampler3D::train(const std::string &label,
             if (th_data[z1] < min_th) th_data[z1] = min_th;
         }
 
-        // Serial STDP weight update for the winning filter.
-        // 26K iterations of a lightweight exp() are faster serial than
-        // dispatched through TBB (parallel overhead + 208 KB heap alloc
-        // dominated total cost at this granularity).
+        // Serial STDP weight update for the winning filter
         const float post_t = spike.time;
         for (size_t x = 0; x < Fw; ++x)
             for (size_t y = 0; y < Fh; ++y)
@@ -367,6 +409,9 @@ void ConvolutionSampler3D::on_epoch_end()
 {
     Convolution3D::on_epoch_end();
 
+    if (_sampler)
+        _sampler->adapt_parameters(parameter<float>("annealing").get());
+
     _epoch_counter++;
     uint32_t total = parameter<uint32_t>("epoch").get();
     double fps = _sample_count_epoch > 0
@@ -379,8 +424,6 @@ void ConvolutionSampler3D::on_epoch_end()
     _fire_count_epoch = 0;
     _sample_count_epoch = 0;
 
-    // Persist weights at the end of every epoch (cheap, overwrites).
-    // The file always reflects the latest epoch when training finishes.
     if (!_last_label.empty())
     {
         _weights_saved = false;
@@ -388,19 +431,14 @@ void ConvolutionSampler3D::on_epoch_end()
     }
 }
 
-// ---------------------------------------------------------------------------
-// TEST
-// ---------------------------------------------------------------------------
-//
-// This is where we get the big speedup. Inference walks every input spike,
-// and for each spike updates a set of (x,y,k) output positions across all
+
+// Inference walks every input spike, and for each spike updates a set of (x,y,k) output positions across all
 // filters z. We partition the filter index z into N chunks (N = thread count)
 // and run them in parallel. Each thread:
 //   - sees the SAME read-only spike list
 //   - writes only to _a_local[*,*,z_chunk,*] and _inh_local[*,*,z_chunk,*]
 //   - appends fired spikes to its OWN local vector
 // At the end we concatenate the per-thread output vectors into output_spike.
-// Weights are read-only in test, so no race on w/th anywhere.
 // ---------------------------------------------------------------------------
 void ConvolutionSampler3D::test(const std::string &label,
                                 const std::vector<Spike> &input_spike,
@@ -411,8 +449,6 @@ void ConvolutionSampler3D::test(const std::string &label,
 
     ensure_state_allocated();
 
-    // When epoch was forced to 0 (weights pre-loaded), train() is never
-    // called, so we must load weights here on the first inference call.
     if (!_model_path_local.empty() && !_weights_loaded)
         try_load_weights(label);
 
@@ -422,11 +458,9 @@ void ConvolutionSampler3D::test(const std::string &label,
 
     const size_t D = depth();
 
-    // Reset state.
     std::fill(std::begin(_a_local),   std::end(_a_local),   0.0f);
     std::fill(std::begin(_inh_local), std::end(_inh_local), false);
 
-    // Build z-chunks. Each chunk is owned by exactly one task.
     size_t nthreads = std::min<size_t>(_num_threads, D);
     if (nthreads == 0) nthreads = 1;
 
@@ -434,7 +468,6 @@ void ConvolutionSampler3D::test(const std::string &label,
     for (size_t t = 0; t <= nthreads; ++t)
         chunk_starts[t] = (D * t) / nthreads;
 
-    // Each task index processes filters [chunk_starts[t], chunk_starts[t+1]).
     std::vector<size_t> task_idx(nthreads);
     std::iota(task_idx.begin(), task_idx.end(), 0);
 
@@ -446,7 +479,6 @@ void ConvolutionSampler3D::test(const std::string &label,
             const size_t z_hi = chunk_starts[t + 1];
             std::vector<Spike> &local_out = per_thread_out[t];
 
-            // Pre-fetch a forward-output buffer reused across spikes.
             std::vector<std::tuple<uint16_t, uint16_t, uint16_t,
                                    uint16_t, uint16_t, uint16_t>> output_positions;
 
@@ -469,7 +501,6 @@ void ConvolutionSampler3D::test(const std::string &label,
                         if (inhibition && _inh_local.at(x, y, z, k))
                             continue;
 
-                        // Disjoint write: only this thread touches z in [z_lo, z_hi).
                         _a_local.at(x, y, z, k) += w.at(w_x, w_y, spike.z, z, w_k);
 
                         if (_a_local.at(x, y, z, k) >= th.at(z))
@@ -483,7 +514,6 @@ void ConvolutionSampler3D::test(const std::string &label,
             }
         });
 
-    // Merge thread-local outputs.
     size_t total = 0;
     for (auto &v : per_thread_out) total += v.size();
     output_spike.reserve(output_spike.size() + total);

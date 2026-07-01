@@ -1,3 +1,0 @@
-log_file,experiment_name,random_seed_log,run_start,run_end,duration,train_samples,test_samples,train_videos,test_videos,layer_name,layer_type,epoch,filter_w,filter_h,filter_k,filter_num,wta_infer,sampler,activity_train_sparsity,activity_train_active,activity_test_sparsity,activity_test_active,svm_accuracy,svm_correct,svm_total
-log_kth_123.txt,kth_123,123,12:50:51 1/4/2026,13:6:20 1/4/2026,0h 15m 28s,1532,864,383,216,conv1,Convolution3D,100,5,5,2,64,1,HOGSampler3D,0.305567,99.9347,0.308542,99.982,66.8981,578,864
-log_kth_123_1.txt,kth_123_1,123,13:9:14 1/4/2026,,,1532,864,383,216,conv1,Convolution3D,100,5,5,2,64,1,RandomSampler3D,,,,,,,

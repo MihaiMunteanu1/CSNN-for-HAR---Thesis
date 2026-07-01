@@ -1,6 +1,8 @@
 .vscode/
 apps/TimeStream.cpp
 src/process/skeletonPose
-build/
-csnn-simulator-build/
-.gitnexus
+md/
+cmake-build-remote-release/
+optuna/others
+hog/
+cnn_har_app/

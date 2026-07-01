@@ -1,6 +1,7 @@
 #pragma once
 
 #include "layer/Convolution3D.h"
+#include "Sampler.h"
 #include "Tensor.h"
 #include <vector>
 #include <mutex>
@@ -44,6 +45,13 @@ namespace layer {
         // Overrides
         Shape compute_shape(const Shape &previous_shape) override;
 
+        // Patch extraction entry point. The base Convolution3D uses a plain
+        // random patch; here we delegate the patch location to the injected
+        // Sampler (HOG / Random / ...) so the sampling strategy lives with
+        // this class instead of the generic convolution layer.
+        void process_train_sample(const std::string &label, Tensor<float> &sample,
+                                  size_t current_pass, size_t current_index, size_t number) override;
+
         void train(const std::string &label,
                    const std::vector<Spike> &input_spike,
                    const Tensor<Time> &input_time,
@@ -57,6 +65,11 @@ namespace layer {
         void on_epoch_end() override;
 
     private:
+        // Patch sampling strategy, injected as the "sampler" parameter.
+        // Lives here (not in the generic Convolution3D) so the base layer
+        // stays sampler-agnostic.
+        Sampler *_sampler;
+
         // Local activation / inhibition state. We can't reuse the base
         // class' (which lives in the private _priv::Convolution3DImpl).
         Tensor<float> _a_local;

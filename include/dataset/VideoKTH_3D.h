@@ -87,10 +87,31 @@ namespace dataset
 
 		static void reset_sample_mappings();
 
+		/**
+		 * @brief Returns true if the loaded NPY metadata contains per-sample
+		 * bboxes (full-frame mode). False for legacy crop mode.
+		 */
+		static bool has_bboxes();
+
+		/**
+		 * @brief Returns (x, y, w, h) for the bbox of train sample `local_idx`
+		 * at temporal frame `t`. Coordinates are in output-resolution pixel
+		 * space (matches the NPY frame layout). Returns (0,0,0,0) if no bbox.
+		 */
+		static std::tuple<int, int, int, int> get_train_sample_bbox(size_t local_idx, size_t t);
+		static std::tuple<int, int, int, int> get_val_sample_bbox(size_t local_idx, size_t t);
+		static std::tuple<int, int, int, int> get_test_sample_bbox(size_t local_idx, size_t t);
+
+		static const std::map<size_t, std::pair<std::string, size_t>>& get_val_sample_mapping();
+
 
 	private:
 		void load_hog_json(const std::string &json_path);
 		std::string get_relative_video_key(const std::string &video_path) const;
+
+		// NPY cache mode (raw uint8 frames pre-extracted by cnn_har_app/extract_frames_kth.py)
+		void load_npy_cache(const std::string &npy_path);
+		std::pair<std::string, Tensor<InputType>> next_from_cache();
 
 		uint32_t swap(uint32_t v);
 
@@ -133,10 +154,42 @@ namespace dataset
 
 		// Sample index -> (video_key, group_idx) mapping, built during next()
 		static std::map<size_t, std::pair<std::string, size_t>> _train_sample_mapping;
+		static std::map<size_t, std::pair<std::string, size_t>> _val_sample_mapping;
 		static std::map<size_t, std::pair<std::string, size_t>> _test_sample_mapping;
 		static size_t _train_sample_counter;
+		static size_t _val_sample_counter;
 		static size_t _test_sample_counter;
-		bool _is_train;
+		// Active split for this dataset instance: "train", "val", or "test".
+		// Inferred from _video_folder_path in the constructor.
+		std::string _split_name;
+
+		// NPY cache: pre-extracted person-cropped frames, loaded once.
+		// Layout: _npy_frames is flat, sample i offset = i * T * H * W.
+		bool _use_npy_cache;
+		static bool _npy_loaded;
+		static std::vector<uint8_t> _npy_frames;
+		static size_t _npy_N, _npy_T, _npy_H, _npy_W;
+		static std::vector<int> _npy_labels;
+		static std::vector<std::string> _npy_actions;
+		static std::vector<std::string> _npy_video_keys;
+		static std::vector<size_t> _npy_group_idx;
+		static std::vector<std::string> _npy_splits;
+		// Per-instance: indices into the global cache filtered by this split.
+		std::vector<size_t> _split_sample_indices;
+
+		// Per-sample bboxes from NPY metadata. Flat layout: bbox(i, t, c) =
+		// _npy_bboxes[((i * T) + t) * 4 + c] with c in {0:x, 1:y, 2:w, 3:h}.
+		// Empty when the metadata does not provide bboxes (legacy crop mode).
+		static bool _npy_has_bboxes;
+		static std::vector<int> _npy_bboxes;
+
+		// Global indices of train/val/test samples in the same order they will
+		// be emitted by next(). Built once from _npy_splits so that static
+		// accessors (used by HOGSampler3D) can map per-split local idx ->
+		// global idx.
+		static std::vector<size_t> _train_global_indices;
+		static std::vector<size_t> _val_global_indices;
+		static std::vector<size_t> _test_global_indices;
 	};
 
 }

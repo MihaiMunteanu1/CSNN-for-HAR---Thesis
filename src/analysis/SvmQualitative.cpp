@@ -8,13 +8,14 @@
 #include <iomanip>
 #include <sstream>
 
+
+/***
+ */
+
 using namespace analysis;
 
 static RegisterClassParameter<SvmQualitative, AnalysisFactory> _svm_qual_register("SvmQualitative");
 
-// Delegate to the protected templated base constructor so the base class
-// fields are initialized once and we still register under our own name
-// in the AnalysisFactory.
 SvmQualitative::SvmQualitative() :
 	Svm(_svm_qual_register),
 	_records(),
@@ -24,11 +25,8 @@ SvmQualitative::SvmQualitative() :
 }
 
 void SvmQualitative::before_test() {
-	// Reset base-class counters via the parent implementation.
 	Svm::before_test();
 
-	// Reset our own tracking state so a re-run within the same process
-	// (for example across epochs) starts clean.
 	_records.clear();
 	_confusion_matrix.clear();
 	_class_names.clear();
@@ -36,8 +34,7 @@ void SvmQualitative::before_test() {
 
 void SvmQualitative::process_test(const std::string& label, const Tensor<float>& sample) {
 	// Mirrors Svm::process_test but captures the predicted label so we can
-	// build per-sample records and a confusion matrix. We deliberately do
-	// NOT call the base implementation to avoid running svm_predict twice.
+	// build per-sample records and a confusion matrix.
 	size_t node_cursor = 0;
 	for (size_t j = 0; j < _size; j++) {
 		float v = sample.at_index(j);
@@ -64,7 +61,6 @@ void SvmQualitative::process_test(const std::string& label, const Tensor<float>&
 		predicted_label = "<unknown>";
 	}
 
-	// True label check (same logic as Svm::process_test).
 	auto it = _label_index.find(label);
 	bool correct = (it != std::end(_label_index) && y_pred == it->second);
 	if (correct) {
@@ -98,7 +94,6 @@ void SvmQualitative::print_confusion_matrix() {
 		return;
 	}
 
-	// Column width: at least the length of the longest label or 6.
 	size_t col_w = 6;
 	for (const auto& name : _class_names) {
 		col_w = std::max(col_w, name.size() + 1);
@@ -114,7 +109,6 @@ void SvmQualitative::print_confusion_matrix() {
 	}
 	oss << std::endl;
 
-	// Body rows
 	for (const auto& true_name : _class_names) {
 		oss << std::setw(static_cast<int>(col_w)) << true_name;
 		for (const auto& pred_name : _class_names) {
@@ -134,9 +128,7 @@ void SvmQualitative::print_confusion_matrix() {
 	experiment().log() << oss.str() << std::endl;
 }
 
-// Minimal JSON string escaper: handles the characters required by the spec
-// (backslash, quote, control chars). Sufficient for action names and file
-// paths coming from the KTH dataset, which are ASCII.
+
 static std::string json_escape(const std::string& s) {
 	std::string out;
 	out.reserve(s.size() + 2);
@@ -162,7 +154,6 @@ static std::string json_escape(const std::string& s) {
 }
 
 void SvmQualitative::save_json() {
-	// Resolve video keys from the static mapping populated by VideoKTH_3D.
 	const auto& mapping = dataset::VideoKTH_3D::get_test_sample_mapping();
 	for (auto& rec : _records) {
 		auto it = mapping.find(rec.sample_idx);
@@ -207,9 +198,7 @@ void SvmQualitative::save_json() {
 	}
 	f << "],\n";
 
-	// Confusion matrix as nested arrays (rows = true, cols = predicted),
-	// in the same order as the "classes" array above so the Python side
-	// can index it directly.
+
 	f << "  \"confusion_matrix\": [\n";
 	for (size_t i = 0; i < _class_names.size(); i++) {
 		f << "    [";
@@ -231,8 +220,7 @@ void SvmQualitative::save_json() {
 	}
 	f << "  ],\n";
 
-	// Per-sample records. Each entry is self-contained so the Python
-	// visualizer can process them independently.
+
 	f << "  \"samples\": [\n";
 	for (size_t i = 0; i < _records.size(); i++) {
 		const auto& r = _records[i];
@@ -256,13 +244,9 @@ void SvmQualitative::save_json() {
 }
 
 void SvmQualitative::after_test() {
-	// Run the qualitative analysis BEFORE the base class tears down svm_model
-	// and the associated buffers.
 	build_class_names();
 	print_confusion_matrix();
 	save_json();
 
-	// Delegate to the base class for the standard "classification rate"
-	// log line and to free the libsvm buffers.
 	Svm::after_test();
 }

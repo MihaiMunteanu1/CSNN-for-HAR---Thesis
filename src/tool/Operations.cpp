@@ -286,7 +286,7 @@ void LoadWeights(std::string fileName, std::string label, Tensor<float> &in)
 void SaveWeights(std::string fileName, std::string label, Tensor<float> output)
 {
     std::ofstream _jsonTextFile;
-    _jsonTextFile.open(fileName, std::ios_base::app);
+    _jsonTextFile.open(fileName, std::ios_base::out | std::ios_base::trunc);
     std::string JSON_output;
     std::string type_Name;
     size_t size = output.shape().product();

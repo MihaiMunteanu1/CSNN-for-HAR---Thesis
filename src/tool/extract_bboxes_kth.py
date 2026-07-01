@@ -105,9 +105,6 @@ def score_box(box, prev_box, frame_w, frame_h):
     return conf + area_term + temporal_term + src_bias
 
 def merge_hog_mog2(hog_boxes, mog_boxes, prev_box, frame_w, frame_h, iou_merge_th=0.35):
-    """
-    Return list of selected boxes (usually 1), robustly fused.
-    """
     # Normalize confidence per source
     hog_n = normalize_confidences(hog_boxes)
     mog_n = normalize_confidences(mog_boxes)
@@ -143,16 +140,13 @@ def merge_hog_mog2(hog_boxes, mog_boxes, prev_box, frame_w, frame_h, iou_merge_t
         else:
             fused.append(h)
 
-    # Add unpaired MOG2
     for j, m in enumerate(mog_n):
         if j not in used_m:
             fused.append(m)
 
-    # If nothing fused, return empty
     if not fused:
         return []
 
-    # Score all and keep best
     best = None
     best_score = -1e18
     for b in fused:
@@ -165,8 +159,7 @@ def merge_hog_mog2(hog_boxes, mog_boxes, prev_box, frame_w, frame_h, iou_merge_t
 
 def smooth_bbox(prev_box, cur_box, alpha=0.65):
     """
-    EMA smoothing for stable temporal boxes.
-    alpha close to 1 => more inertia.
+    EMA smoothing for stable temporal boxes
     """
     if prev_box is None:
         return cur_box
@@ -236,47 +229,6 @@ def detect_persons_mog2(frame_gray, fgbg, frame_width, frame_height, min_area):
         "source": "mog2"
     }]
 
-
-# def scan_video_frames(video_path, hog, args):
-#     cap = cv2.VideoCapture(video_path)
-#     if not cap.isOpened():
-#         print(f"  WARNING: Cannot open {video_path}")
-#         return [], False
-#
-#     all_frames = []
-#     idx = 0
-#     while True:
-#         ret, frame = cap.read()
-#         if not ret:
-#             break
-#         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-#         bboxes = detect_persons_in_frame(gray, hog, args.frame_width, args.frame_height, args.hit_threshold)
-#         all_frames.append((idx, bboxes))
-#         idx += 1
-#     cap.release()
-#
-#     det_count = sum(1 for _, b in all_frames if b)
-#     if det_count == 0 and args.mog2_fallback:
-#         cap = cv2.VideoCapture(video_path)
-#         if not cap.isOpened():
-#             return all_frames, False
-#
-#         fgbg = cv2.createBackgroundSubtractorMOG2(history=50, varThreshold=16, detectShadows=False)
-#         all_frames = []
-#         idx = 0
-#         while True:
-#             ret, frame = cap.read()
-#             if not ret:
-#                 break
-#             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-#             gray = cv2.resize(gray, (args.frame_width, args.frame_height))
-#             bboxes = detect_persons_mog2(gray, fgbg, args.frame_width, args.frame_height, args.mog2_min_area)
-#             all_frames.append((idx, bboxes))
-#             idx += 1
-#         cap.release()
-#         return all_frames, True
-#
-#     return all_frames, False
 
 def scan_video_frames(video_path, hog, args):
     cap = cv2.VideoCapture(video_path)
@@ -351,8 +303,8 @@ def scan_video_frames(video_path, hog, args):
             if selected_box.get("source", "").find("mog2") != -1:
                 used_any_mog2 = True
         else:
-            # short temporal carry (helps group continuity)
-            if prev_selected is not None and miss_streak < 2:
+            # short temporal carry
+            if prev_selected is not None and miss_streak < args.max_carry:
                 bboxes = [prev_selected]
                 miss_streak += 1
             else:
@@ -514,6 +466,8 @@ def process_dataset(input_path, split, hog, args):
 
     results = {}
     for action in sorted(os.listdir(split_path)):
+        if args.only_action and action != args.only_action:
+            continue
         action_path = os.path.join(split_path, action)
         if not os.path.isdir(action_path):
             continue
@@ -545,18 +499,6 @@ def process_dataset(input_path, split, hog, args):
                 "groups": groups
             }
 
-            # if args.preview_dir and previews_saved_for_action < args.preview_videos_per_action:
-            #     save_preview_images(
-            #         video_path=video_path,
-            #         groups=groups,
-            #         action=action,
-            #         video_name=video_name,
-            #         out_dir=os.path.join(args.preview_dir, split),
-            #         frame_width=args.frame_width,
-            #         frame_height=args.frame_height,
-            #         num_previews=args.preview_groups_per_video
-            #     )
-            #     previews_saved_for_action += 1
 
         action_videos = len([k for k in results if k.startswith(f"{split}/{action}/")])
         print(f"    Done: {len(videos)} videos, {action_videos} with valid groups")
@@ -571,29 +513,30 @@ def build_parser():
         "--input_path",
         type=str,
         default="",
-        help="Path to organized KTH dataset root (must contain train/ and test/)"
+        help="Path to organized KTH dataset root (must contain train/, val/, test/)"
     )
     p.add_argument("--temporal_kernel", type=int, default=7) #sau un 15
-    p.add_argument("--num_groups", type=int, default=10)
+    p.add_argument("--num_groups", type=int, default=5)
     p.add_argument("--frame_gap", type=int, default=2)
 
-    p.add_argument("--frame_width", type=int, default=80)
-    p.add_argument("--frame_height", type=int, default=60)
+    p.add_argument("--frame_width", type=int, default=160)
+    p.add_argument("--frame_height", type=int, default=120)
 
     p.add_argument("--hit_threshold", type=float, default=-0.75)
     p.add_argument("--mog2_fallback", action="store_true", default=True)
-    p.add_argument("--mog2_min_area", type=int, default=180) #180 pentru 80x60, 720
+    p.add_argument("--mog2_min_area", type=int, default=720) #180 pentru 80x60, 720
 
+    p.add_argument("--max_carry", type=int, default=2)
     p.add_argument("--min_bbox_area_ratio", type=float, default=0.008) #0.012 was before
     p.add_argument("--min_bbox_aspect", type=float, default=0.22) #0.2 before
     p.add_argument("--max_bbox_aspect", type=float, default=1.6) #1.4 before
 
-    p.add_argument("--output", type=str, default="",
-                   help="Output JSON path (default: ../hog/hog_person_data_{temporal_kernel}_v2.json)")
-    p.add_argument("--preview_dir", type=str, default="",
-                   help="Preview images dir (default: ../hog/hog_previews_{temporal_kernel}_v2)")
-    p.add_argument("--preview_videos_per_action", type=int, default=2)
-    p.add_argument("--preview_groups_per_video", type=int, default=3)
+    p.add_argument("--only_action", type=str, default="")
+    p.add_argument("--merge_into", type=str, default="")
+    p.add_argument("--output", type=str, default="")
+    p.add_argument("--preview_dir", type=str, default="")
+    p.add_argument("--preview_videos_per_action", type=int, default=1)
+    p.add_argument("--preview_groups_per_video", type=int, default=1)
 
     return p
 
@@ -607,16 +550,14 @@ def main():
     hog = cv2.HOGDescriptor()
     hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-    # args.input_path ="/home/mihai/kth_organized/" #os.getenv("INPUT_PATH")
-    #"/home/mihai/kth_organized/"
-    args.input_path = "/home/mmuntean/kth_organized/"
     if not args.input_path:
-        print("ERROR: INPUT_PATH environment variable not set!")
-        raise SystemExit(1)
+        args.input_path = "/home/mmuntean/kth_organized_tvt/"
 
-    args.output = "../hog/hog_person_data_" + str(args.temporal_kernel) + ".json"
-
-    args.preview_dir = "../hog/hog_previews_" + str(args.temporal_kernel) +""
+    if not args.output:
+        suffix = ("_only_" + args.only_action) if args.only_action else ""
+        args.output = "hog/hog_person_data_tvt_elassal_" + str(args.temporal_kernel) + suffix + ".json"
+    if not args.preview_dir:
+        args.preview_dir = "../hog/hog_previews_tvt_" + str(args.temporal_kernel)
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     os.makedirs(args.preview_dir, exist_ok=True)
@@ -627,6 +568,10 @@ def main():
     print(f"Groups/video:    {args.num_groups}")
     print(f"Frame gap:       {args.frame_gap}")
     print(f"Frame size:      {args.frame_width}x{args.frame_height}")
+    if args.only_action:
+        print(f"Only action:     {args.only_action}")
+    if args.merge_into:
+        print(f"Merge into:      {args.merge_into}")
     print(f"Detection res:   {args.frame_width * _HOG_SCALE_FACTOR}x{args.frame_height * _HOG_SCALE_FACTOR}")
     print(f"MOG2 fallback:   {args.mog2_fallback}")
     print(f"Preview dir:     {args.preview_dir if args.preview_dir else '(disabled)'}")
@@ -643,16 +588,43 @@ def main():
         "videos": {}
     }
 
-    for split in ["train", "test"]:
+    for split in ["train", "val", "test"]:
+        split_dir = os.path.join(args.input_path, split)
+        if not os.path.isdir(split_dir):
+            print(f"Skipping '{split}/' (folder missing under {args.input_path})")
+            continue
         print(f"Processing {split}/...")
         split_results = process_dataset(args.input_path, split, hog, args)
         output_data["videos"].update(split_results)
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2)
+    if args.merge_into:
+        with open(args.merge_into, "r", encoding="utf-8") as f:
+            base = json.load(f)
+        base_videos = base.get("videos", {})
 
-    print(f"\nDone. Videos with valid groups: {len(output_data['videos'])}")
-    print(f"Saved JSON: {args.output}")
+        new_actions = {k.split("/")[1] for k in output_data["videos"] if len(k.split("/")) >= 2}
+        if args.only_action:
+            new_actions.add(args.only_action)
+
+        removed = [k for k in base_videos if len(k.split("/")) >= 2 and k.split("/")[1] in new_actions]
+        for k in removed:
+            del base_videos[k]
+        base_videos.update(output_data["videos"])
+        base["videos"] = base_videos
+
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(base, f, indent=2)
+
+        print(f"\nMerge done for action(s): {sorted(new_actions)}")
+        print(f"  removed {len(removed)} old keys, added {len(output_data['videos'])} new keys")
+        print(f"  total videos in merged JSON: {len(base_videos)}")
+        print(f"Saved merged JSON: {args.output}")
+    else:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2)
+
+        print(f"\nDone. Videos with valid groups: {len(output_data['videos'])}")
+        print(f"Saved JSON: {args.output}")
 
 
 if __name__ == "__main__":

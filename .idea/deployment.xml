@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" confirmBeforeUploading="false" confirmBeforeDeletion="false">
+  <component name="PublishConfigData" serverName="Remote Host Lux (00d80234-cbf2-40aa-92e0-2e32d5c9df18)" confirmBeforeUploading="false" confirmBeforeDeletion="false">
     <option name="confirmBeforeDeletion" value="false" />
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
@@ -14,6 +14,20 @@
           </excludedPaths>
         </serverdata>
       </paths>
+      <paths name="Remote Host Lux (00d80234-cbf2-40aa-92e0-2e32d5c9df18)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/mmuntean/csnn_simulator_v2" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-remote-release" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-remote-release" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />
+            <excludedPath local="true" path="$PROJECT_DIR$/" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
       <paths name="Remote HostGRID (a42d171d-f7a2-4cb6-8bf6-347b7e1693c9)">
         <serverdata>
           <mappings>
@@ -21,6 +35,7 @@
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-remote-release" />
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-debug-remote-hostgrid" />
           </excludedPaths>
         </serverdata>
