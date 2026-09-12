@@ -78,7 +78,11 @@ def main():
     config = in_data.get("config", {})
     src_w = config.get("frame_width", 160)
     src_h = config.get("frame_height", 120)
-    T = config.get("temporal_kernel", 19)
+    T = config.get("temporal_kernel")
+    if T is None:
+        raise SystemExit(
+            "bbox JSON has no config.temporal_kernel; re-run extract_bboxes_kth.py"
+        )
     H = args.frame_size_height
     W = args.frame_size_width
 
@@ -88,6 +92,9 @@ def main():
 
     frames_list = []
     samples_meta = []
+    n_missing_video = 0
+    n_unopenable = 0
+    n_bad_group_len = 0
 
     videos = in_data.get("videos", {})
     n_videos = len(videos)
@@ -104,6 +111,7 @@ def main():
 
         video_path = Path(args.video_root) / video_key
         if not video_path.exists():
+            n_missing_video += 1
             continue
 
         groups = video_data.get("groups", [])
@@ -117,6 +125,7 @@ def main():
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
+            n_unopenable += 1
             continue
 
         loaded = {}
@@ -138,6 +147,9 @@ def main():
         cap.release()
 
         for gi, group in enumerate(groups):
+            if len(group) != T:
+                n_bad_group_len += 1
+                continue
             clip = np.zeros((T, H, W), dtype=np.uint8)
             bboxes_per_t = []
             ok = True
@@ -170,7 +182,10 @@ def main():
             print(f"  [{vi+1:4d}/{n_videos}] {video_key} | total samples: {len(frames_list)}")
 
     if not frames_list:
-        raise SystemExit("No samples extracted. Check --video_root and --bbox_json.")
+        raise SystemExit(
+            f"No samples extracted ({n_missing_video}/{n_videos} videos not found under "
+            f"{args.video_root}). Check --video_root and --bbox_json."
+        )
 
     arr = np.stack(frames_list, axis=0)
     split_counts = {s: sum(1 for m in samples_meta if m["split"] == s)
@@ -183,6 +198,13 @@ def main():
         print(f"  {s:5s}         : {split_counts[s]}")
     print(f"  shape         : {arr.shape}  dtype={arr.dtype}")
     print(f"  size          : {arr.nbytes / 1e6:.1f} MB")
+    if n_missing_video:
+        print(f"  WARN: {n_missing_video} videos listed in the JSON were not found under "
+              f"{args.video_root} (wrong --video_root?)")
+    if n_unopenable:
+        print(f"  WARN: {n_unopenable} videos could not be opened by OpenCV")
+    if n_bad_group_len:
+        print(f"  WARN: {n_bad_group_len} groups skipped (length != T={T})")
 
     out_npy = args.output + ".npy"
     out_json = args.output + ".json"
