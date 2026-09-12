@@ -69,7 +69,7 @@ mkdir -p optuna_studies data/logs
 LOG="data/logs/log_${SESSION}_$(date +%Y%m%d_%H%M%S).txt"
 
 
-CMD="python3 optuna/tune_csnn_optuna.py \
+CMD="python3 optuna/tune_csnn_optuna_1layer.py \
     --binary $BINARY \
     --data $DATA \
     --input_root $INPUT_ROOT \

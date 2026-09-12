@@ -214,7 +214,7 @@ def main():
     print(f"  std         : {study.best_trial.user_attrs.get('acc_std')}")
     print()
     print("To run the test protocol with these params, pass them to "
-          "run_test_protocol.py (e.g. --params_from_study).")
+          "run_test_protocol_1layer.py (e.g. --params_from_study).")
 
 
 if __name__ == "__main__":

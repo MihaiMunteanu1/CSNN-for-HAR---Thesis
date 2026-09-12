@@ -64,18 +64,15 @@ while the bboxes are rescaled from the 160x120 detection resolution to
 match. The resulting `.npy` is what the Optuna scripts are pointed
 at through their `DATA` variable.
 
-### 2. My contributions to the simulator
+### 2. Contributions to the simulator
 
-The KTH / HAR functionality is built on top of the existing simulator through the following files, which are the ones I created or modified:
-
-*   `apps/kth/` — the experiment entry points: `KTH_1layer.cpp`, `KTH_2layer.cpp` and `KTH_3layer.cpp`, one per network depth. Each builds the network (input layer, 3D convolution with STDP, pooling, SVM head), reads its whole configuration from `CSNN_*` environment variables, and prints the final `classification rate: XX.XX%` line that the Optuna drivers parse.
-*   `include/dataset/VideoKTH_3D.h` — the dataset class (header-only). It loads the `.npy` produced by the preprocessing stage together with its `.json` sidecar, exposes the clips as 3D (T x H x W) inputs, keeps the per-frame bounding boxes attached to each sample, and selects the train / val / test subset according to `CSNN_EVAL_SPLIT`.
-*   `src/sampler/HOGSampler3D.cpp` (+ `src/sampler/RandomSampler3D.cpp` as baseline) — the skeleton-based (HOG-guided) sampler. Instead of drawing patch locations uniformly over the frame, it restricts sampling to the person region given by the bounding boxes, so the filters are learned on the moving subject rather than on the static background. The generic uniform sampler is used as the baseline for comparison (`CSNN_SAMPLER=hog|random`).
+*   `apps/kth/` — the experiment entry points: `KTH_1layer.cpp`, `KTH_2layer.cpp` and `KTH_3layer.cpp`
+*   `include/dataset/VideoKTH_3D.h` — It loads the `.npy` produced by the preprocessing stage together with its `.json` sidecar, exposes the clips as 3D (T x H x W) inputs, keeps the per-frame bounding boxes attached to each sample
+*   `src/sampler/HOGSampler3D.cpp` (`src/sampler/RandomSampler3D.cpp` as baseline) — the skeleton-based (HOG-guided) sampler. Instead of drawing patch locations uniformly over the frame, it restricts sampling to the person region given by the bounding boxes, so the filters are learned on the moving subject rather than on the static background. 
 *   `src/layer/ConvolutionSampler3D.cpp` — the 3D convolution layer driven by the sampler above, which learns its filters with STDP on the sampled spatio-temporal patches.
 
-### 3. Building the KTH binaries
+### 3. KTH binaries
 
-Each file in `apps/` becomes a target named after it. All the scripts below expect the build directory to be `cmake-build-release/` at the repository root (override with `CSNN_BUILD_DIR` if yours is named differently), so from inside it:
 
 ```bash
 cmake --build . --target KTH_1layer -j$(nproc)
@@ -83,14 +80,12 @@ cmake --build . --target KTH_2layer -j$(nproc)
 cmake --build . --target KTH_3layer -j$(nproc)
 ```
 
-The binaries are configured entirely through environment variables (`CSNN_DATA`, `CSNN_EVAL_SPLIT`, `CSNN_SAMPLER`, `CSNN_SEED`, `CSNN_T_OBJ`, `CSNN_FH/FW/FT`, `CSNN_NF`, `CSNN_POOL_SX/SY/ST`, `CSNN_EPOCHS`, `CSNN_VIDEO_FRAMES`, ...), which is what lets the Optuna drivers launch many configurations in parallel without recompiling. Running a binary by hand is possible but not the intended way; use the scripts below.
 
 ### 4. Hyperparameter search with Optuna
 
-The scripts in `optuna/` drive the C++ binaries: a Python driver samples a configuration, launches the binary once per seed with `CSNN_EVAL_SPLIT=val`, parses the accuracy from stdout and returns the mean across seeds as the objective. Studies are stored in a SQLite database (`optuna_studies/csnn_kth.db`) under a name that encodes depth and sampler, so a study can be resumed by relaunching the same command.
+The Python scripts in `optuna/` optimize the C++ binaries by running sampled configurations across multiple seeds (CSNN_EVAL_SPLIT=val) and averaging the output accuracies. Studies are saved in optuna_studies/csnn_kth.db and can be easily resumed.
 
-The wrappers are launched from the repository root and already default to the dataset extracted above (`../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy`, i.e. a `hog/` folder next to the repository) and to the `cmake-build-release/` binaries, so they take a single argument - the sampler:
-
+Launch the wrappers from the repository root with a single argument: the sampler. Paths to the dataset (../hog/) and binaries (cmake-build-release/) are already configured by default.
 ```bash
 ./optuna/run_tuning_1layer.sh hog          # 1 layer, skeleton-based sampling
 ./optuna/run_tuning_1layer.sh random       # 1 layer, generic sampling (baseline)
@@ -106,37 +101,24 @@ N_TRIALS=100 N_JOBS=32 STUDY_SUFFIX=v2 ./optuna/run_tuning_1layer.sh hog
 
 The search space of the 1-layer study is `t_obj` in 0.40..0.80 (step 0.05), filter size in {3, 5, 7, 9} and temporal depth in {2, 3}; the deeper studies freeze the earlier layers and only tune the threshold of the newly added one.
 
-### 5. Final test protocol
+### 5. Test protocol
 
 Validation is used only to choose a configuration; the test split is touched only here. The protocol takes one configuration, re-runs it on the **test** split (`CSNN_EVAL_SPLIT=test`) with 10 seeds, prints the mean and standard deviation, and appends a row to a CSV with the full per-seed accuracies.
 
 ```bash
-./optuna/run_test_1layer.sh          # 1 layer, skeleton-based sampler
+./optuna/run_test_1layer.sh hog   # 1 layer, skeleton-based sampler
 ./optuna/run_test_2layer.sh hog   # 2 layers
 ./optuna/run_test_3layer.sh hog   # 3 layers
 ./optuna/run_test_2layer.sh random
 ```
 
-The configuration is read from the corresponding Optuna study (`optuna_studies/csnn_kth.db`), so the tuning must have run first; `STUDY_NAME` selects which study to take it from, `OUT_CSV` where to write, `N_JOBS` how many seeds run at once, and `DATA` / `INPUT_ROOT` / `CSNN_BUILD_DIR` behave as in the tuning step:
+The configuration is read from the corresponding Optuna study (`optuna_studies/csnn_kth.db`), so the tuning must have run first. The study name defaults to the one the tuning step creates (`csnn_1layer_hog`, `csnn_2layer_random`, ...); `STUDY_NAME` overrides it, which is what a study launched with a `STUDY_SUFFIX` needs. `OUT_CSV` chooses where the results are written, `N_JOBS` how many seeds run at once, and `DATA` / `INPUT_ROOT` / `CSNN_BUILD_DIR` behave as in the tuning step:
 
 ```bash
-STUDY_NAME=csnn_1layer_hog OUT_CSV=data/test_1layer_hog.csv ./optuna/run_test_1layer.sh
+STUDY_NAME=csnn_1layer_hog_19f OUT_CSV=data/test_1layer_hog.csv ./optuna/run_test_1layer.sh hog
 ```
 
-Alternatively the Python drivers accept a configuration directly instead of a study, which is how a single fixed architecture is re-tested without touching Optuna:
-
-```bash
-python3 -u optuna/run_test_protocol.py \
-    --binary cmake-build-release/KTH_1layer --cwd . \
-    --data ../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy \
-    --sampler hog --n_seeds 10 \
-    --t_obj 0.75 --filter_h 3 --filter_w 3 --filter_t 3 --num_filters 16 \
-    --pool_sx 2 --pool_sy 2 --pool_st 1 --epochs 100 \
-    --n_jobs 10 --threads_per_run 1 \
-    --out_csv data/test_1layer_hog.csv
-```
-
-`run_test_protocol_2layer.py` and `run_test_protocol_3layer.py` work the same way, with `--t_obj2` / `--t_obj3` for the layer being added and `--num_filters1/2/3` for the widths. Temporal pooling must stay disabled (`--pool_st 1`, spatial-only pooling) for the multi-layer runs, otherwise the temporal dimension is exhausted at depth.
+Each wrapper is a thin layer over the corresponding Python driver (`run_test_protocol_1layer.py`, `run_test_protocol_2layer.py`, `run_test_protocol_3layer.py`), which can also be called directly with an explicit configuration instead of a study - `--t_obj` (or `--t_obj2` / `--t_obj3` for the layer being added), `--filter_h/w/t`, `--num_filters1/2/3`, `--pool_sx/sy/st`, `--epochs*`. Temporal pooling must stay disabled (`--pool_st 1`, i.e. `POOL_ST=1`, spatial-only pooling) for the multi-layer runs, otherwise the temporal dimension is exhausted at depth.
 
 ### File map
 
