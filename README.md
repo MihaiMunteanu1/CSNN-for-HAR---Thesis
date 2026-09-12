@@ -1,8 +1,7 @@
 # CSNN-simulator
 
-For Grid'5000 environments:
+Build on a Grid'5000 node 
 ```bash
-For GRID-5000 server:
 mkdir cmake-build-release
 cd cmake-build-release
 cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DUSE_GUI=NO
@@ -66,13 +65,14 @@ at through their `DATA` variable.
 
 ### 2. Contributions to the simulator
 
-*   `apps/kth/` — the experiment entry points: `KTH_1layer.cpp`, `KTH_2layer.cpp` and `KTH_3layer.cpp`
-*   `include/dataset/VideoKTH_3D.h` — It loads the `.npy` produced by the preprocessing stage together with its `.json` sidecar, exposes the clips as 3D (T x H x W) inputs, keeps the per-frame bounding boxes attached to each sample
+*   `apps/kth/` — the experiment entry points: `KTH_1layer.cpp`, `KTH_2layer.cpp` and `KTH_3layer.cpp`, one per network depth.
+*   `include/dataset/VideoKTH_3D.h` — the dataset class. It loads the `.npy` produced by the preprocessing stage together with its `.json` sidecar, exposes the clips as 3D (T x H x W) inputs, keeps the per-frame bounding boxes attached to each sample, and selects the train / val / test subset according to `CSNN_EVAL_SPLIT`.
 *   `src/sampler/HOGSampler3D.cpp` (`src/sampler/RandomSampler3D.cpp` as baseline) — the skeleton-based (HOG-guided) sampler. Instead of drawing patch locations uniformly over the frame, it restricts sampling to the person region given by the bounding boxes, so the filters are learned on the moving subject rather than on the static background. 
 *   `src/layer/ConvolutionSampler3D.cpp` — the 3D convolution layer driven by the sampler above, which learns its filters with STDP on the sampled spatio-temporal patches.
 
 ### 3. KTH binaries
 
+Every file in `apps/` becomes a target named after it, so from inside the build directory:
 
 ```bash
 cmake --build . --target KTH_1layer -j$(nproc)
@@ -80,6 +80,7 @@ cmake --build . --target KTH_2layer -j$(nproc)
 cmake --build . --target KTH_3layer -j$(nproc)
 ```
 
+The binaries take their whole configuration from environment variables (`CSNN_DATA`, `CSNN_EVAL_SPLIT`, `CSNN_SAMPLER`, `CSNN_SEED`, `CSNN_T_OBJ`, `CSNN_FH/FW/FT`, `CSNN_NF`, `CSNN_POOL_SX/SY/ST`, `CSNN_EPOCHS`, `CSNN_VIDEO_FRAMES`), which is what lets the scripts below launch many configurations in parallel without recompiling.
 
 ### 4. Hyperparameter search with Optuna
 
@@ -119,6 +120,8 @@ STUDY_NAME=csnn_1layer_hog_19f OUT_CSV=data/test_1layer_hog.csv ./optuna/run_tes
 ```
 
 Each wrapper is a thin layer over the corresponding Python driver (`run_test_protocol_1layer.py`, `run_test_protocol_2layer.py`, `run_test_protocol_3layer.py`), which can also be called directly with an explicit configuration instead of a study - `--t_obj` (or `--t_obj2` / `--t_obj3` for the layer being added), `--filter_h/w/t`, `--num_filters1/2/3`, `--pool_sx/sy/st`, `--epochs*`. Temporal pooling must stay disabled (`--pool_st 1`, i.e. `POOL_ST=1`, spatial-only pooling) for the multi-layer runs, otherwise the temporal dimension is exhausted at depth.
+
+The results reported in the thesis were produced through that direct path, with the configuration pinned instead of read from a study: 3x3x3 filters and `t_obj = 0.75` in every convolutional layer, 16 / 32 / 64 filters for layers 1 / 2 / 3, pooling 2x2x1, 100 / 80 / 80 epochs, 10 seeds, on `kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy`, for both samplers and all three depths.
 
 ### File map
 
