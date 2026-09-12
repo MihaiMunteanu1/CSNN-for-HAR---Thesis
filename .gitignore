@@ -4,4 +4,5 @@ src/process/skeletonPose
 md/
 cmake-build-remote-release/
 optuna/others
+hog/
 cnn_har_app/
