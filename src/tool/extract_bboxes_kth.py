@@ -515,8 +515,8 @@ def build_parser():
         default="",
         help="Path to organized KTH dataset root (must contain train/, val/, test/)"
     )
-    p.add_argument("--temporal_kernel", type=int, default=7) #sau un 15
-    p.add_argument("--num_groups", type=int, default=5)
+    p.add_argument("--temporal_kernel", type=int, default=19)
+    p.add_argument("--num_groups", type=int, default=10)
     p.add_argument("--frame_gap", type=int, default=2)
 
     p.add_argument("--frame_width", type=int, default=160)
@@ -524,7 +524,7 @@ def build_parser():
 
     p.add_argument("--hit_threshold", type=float, default=-0.75)
     p.add_argument("--mog2_fallback", action="store_true", default=True)
-    p.add_argument("--mog2_min_area", type=int, default=720) #180 pentru 80x60, 720
+    p.add_argument("--mog2_min_area", type=int, default=720)
 
     p.add_argument("--max_carry", type=int, default=2)
     p.add_argument("--min_bbox_area_ratio", type=float, default=0.008) #0.012 was before

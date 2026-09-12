@@ -78,7 +78,7 @@ def main():
     config = in_data.get("config", {})
     src_w = config.get("frame_width", 160)
     src_h = config.get("frame_height", 120)
-    T = config.get("temporal_kernel", 7)
+    T = config.get("temporal_kernel", 19)
     H = args.frame_size_height
     W = args.frame_size_width
 
