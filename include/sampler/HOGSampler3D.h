@@ -10,7 +10,7 @@
 namespace sampler
 {
 	/**
-	 * @brief Samples patches guided by pre-computed HOG person bounding boxes.
+	 * Samples patches guided by pre-computed HOG person bounding boxes.
 	 *
 	 * Uses bounding box data loaded by VideoKTH_3D to sample spatial positions
 	 * inside detected persons. The bounding boxes are stored in the JSON in

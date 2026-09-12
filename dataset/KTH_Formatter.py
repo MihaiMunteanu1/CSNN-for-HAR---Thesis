@@ -1,16 +1,9 @@
 """
-Reorganize kth_organized/{train,test}/<action>/ into the standard
-8/8/9 train/val/test split used by the original KTH protocol.
-
 Splits (by subject id):
   train : 11, 12, 13, 14, 15, 16, 17, 18                    (8 subjects)
   val   : 19, 20, 21, 23, 24, 25, 01, 04                    (8 subjects)
   test  : 02, 03, 05, 06, 07, 08, 09, 10, 22                (9 subjects)
 
-The script does NOT modify the input folder. It writes a brand new tree:
-  <output>/train/<action>/<video>.avi
-  <output>/val/<action>/<video>.avi
-  <output>/test/<action>/<video>.avi
 """
 
 import argparse
@@ -63,7 +56,6 @@ def main():
 
     print(f"Input  : {src}")
     print(f"Output : {dst}")
-    print(f"Mode   : {'DRY RUN' if args.dry_run else 'COPY (real files)'}")
     print()
 
     counts = Counter()
