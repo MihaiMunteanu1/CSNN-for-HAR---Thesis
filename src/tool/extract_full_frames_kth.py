@@ -66,8 +66,8 @@ def main():
     parser.add_argument("--bbox_json", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--video_root", default="/home/mmuntean/kth_organized")
-    parser.add_argument("--frame_size_width", type=int, default=160)
-    parser.add_argument("--frame_size_height", type=int, default=120)
+    parser.add_argument("--frame_size_width", type=int, default=80)
+    parser.add_argument("--frame_size_height", type=int, default=60)
     parser.add_argument("--report_every", type=int, default=25)
     args = parser.parse_args()
 

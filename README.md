@@ -31,8 +31,6 @@ python3 src/tool/extract_bboxes_kth.py \
     --output hog/hog_person_data_tvt_19_f10_g2.json
 ```
 
-These are the settings used for the reported experiments: clips of T = 19 frames taken every 2nd frame, 10 clips per video, detection done at 160x120. If `--input_path` / `--output` are omitted the script falls back to hardcoded paths (`/home/mmuntean/kth_organized_tvt/`), so always pass your own.
-
 The `running` class is the hardest one for the detector (the person leaves the frame, and a clip is kept only if all 19 frames have a valid bbox). It was re-extracted with more permissive thresholds and merged back into the JSON above, which gives the `runfix` JSON actually used:
 
 ```bash
@@ -48,7 +46,10 @@ python3 src/tool/extract_bboxes_kth.py \
     --output    hog/hog_person_data_tvt_19_f10_g2_runfix.json
 ```
 
-Finally, extract the full frames from the videos. This script reads the JSON file generated in the previous step and creates a `.npy` file containing the video frames and a corresponding `.json` file with metadata, including the bounding boxes for each frame. `--video_root` must be the same split folder as above (its default points elsewhere), `--bbox_json` the JSON from the previous step, and `--output` a path *without* extension - `.npy` and `.json` are appended:
+Finally, extract the full frames from the videos. 
+This script reads the JSON file generated in the previous step and 
+creates a `.npy` file containing the video frames and a corresponding 
+`.json` file with metadata, including the bounding boxes for each frame.
 
 ```bash
 python3 src/tool/extract_full_frames_kth.py \
@@ -58,7 +59,10 @@ python3 src/tool/extract_full_frames_kth.py \
     --output hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60
 ```
 
-The frames are stored at 80x60 (the resolution used by the CSNN experiments) while the bboxes are rescaled from the 160x120 detection resolution to match. The resulting `.npy` is what the Optuna scripts are pointed at through their `DATA` variable; the `.json` sidecar must stay next to it, with the same name.
+The frames are stored at 80x60 (the resolution used by the CSNN experiments) 
+while the bboxes are rescaled from the 160x120 detection resolution to 
+match. The resulting `.npy` is what the Optuna scripts are pointed
+at through their `DATA` variable.
 
 ### 2. My contributions to the simulator
 
