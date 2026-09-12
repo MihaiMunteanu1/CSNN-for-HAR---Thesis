@@ -18,7 +18,7 @@ if [ "$SAMPLER" != "hog" ] && [ "$SAMPLER" != "random" ]; then
 fi
 
 CSNN_BUILD_DIR="${CSNN_BUILD_DIR:-cmake-build-release}"
-DATA="${DATA:-../hog/kth_fullframes_tvt_19_f10_g2_80x60.npy}"
+DATA="${DATA:-../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy}"
 INPUT_ROOT="${INPUT_ROOT:-/home/mmuntean/kth_organized_tvt/}"
 N_TRIALS="${N_TRIALS:-50}"
 N_SEEDS="${N_SEEDS:-5}"

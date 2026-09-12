@@ -214,8 +214,8 @@ def main():
                         "nf1", "nf2", "nf3", "pool_sx", "pool_sy", "pool_st",
                         "n_seeds", "mean_acc", "std_acc", "per_seed_accs"])
         w.writerow([
-            args.sampler, c1["t_obj1"], c2["t_obj2"], t_obj3,
-            c1["filter_h"], c1["filter_w"], c1["filter_t"],
+            args.sampler, _t1, _t2, t_obj3,
+            _fh, _fw, _ft,
             args.num_filters1, args.num_filters2, args.num_filters3,
             args.pool_sx, args.pool_sy, args.pool_st,
             len(vals), f"{avg:.2f}", f"{std:.2f}",

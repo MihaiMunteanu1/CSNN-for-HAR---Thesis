@@ -1,14 +1,14 @@
 """
 OPTUNA hyperparameter tuning for the 2-layer CSNN + SVM head on KTH.
 
-Conv1 is FROZEN at the per-sampler best from the 1-layer OPTUNA study
-(RESULTS_KTH_1LAYER.md). Conv2 reuses the same filter shape (same FH/FW/FT)
+Conv1 is FROZEN at the per-sampler best from the 1-layer OPTUNA study.
+Conv2 reuses the same filter shape (same FH/FW/FT)
 with 32 filters; only t_obj2 is tuned.
 
 Usage:
     python3 optuna/tune_csnn_optuna_2layer.py \\
-        --binary csnn-simulator-build-roazhon4/KTH_2layer \\
-        --data ../hog/kth_fullframes_tvt_19_f10_g2_80x60.npy \\
+        --binary cmake-build-release/KTH_2layer \\
+        --data ../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy \\
         --sampler hog \\
         --n_trials 50 \\
         --n_seeds 5
@@ -131,7 +131,7 @@ def main():
     parser.add_argument("--num_filters2", type=int, default=32)
     parser.add_argument("--pool_sx", type=int, default=2)
     parser.add_argument("--pool_sy", type=int, default=2)
-    parser.add_argument("--pool_st", type=int, default=2)
+    parser.add_argument("--pool_st", type=int, default=1)
     parser.add_argument("--epochs1", type=int, default=100)
     parser.add_argument("--epochs2", type=int, default=80)
     parser.add_argument("--per_seed_timeout", type=int, default=3600 * 8)

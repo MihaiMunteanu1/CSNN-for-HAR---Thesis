@@ -19,9 +19,9 @@ Storage:
     you re-launch the script.
 
 Usage:
-    python3 optuna/tune_csnn_optuna.py \\
-        --binary csnn-simulator-build-roazhon4/KTH_1layer \\
-        --data ../hog/kth_fullframes_tvt_g4.npy \\
+    python3 optuna/tune_csnn_optuna_1layer.py \\
+        --binary cmake-build-release/KTH_1layer \\
+        --data ../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy \\
         --input_root /home/mmuntean/kth_organized_tvt/ \\
         --sampler hog \\
         --n_trials 50 \\
@@ -145,7 +145,7 @@ def main():
     parser.add_argument("--n_seeds",  type=int, default=5)
     parser.add_argument("--seeds_base", type=int, default=42)
     parser.add_argument("--num_filters", type=int, default=16)
-    parser.add_argument("--pool_st", type=int, default=2)
+    parser.add_argument("--pool_st", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--per_seed_timeout", type=int, default=3600 * 6)
     parser.add_argument("--study_db", default="optuna_studies/csnn_kth.db")

@@ -2,12 +2,12 @@
 # Launch an OPTUNA tuning study inside a detached tmux session.
 #
 # Usage (from repo root):
-#     ./optuna/run_tuning.sh hog       # tune skeleton-based sampling
-#     ./optuna/run_tuning.sh random    # tune generic sampling
+#     ./optuna/run_tuning_1layer.sh hog       # tune skeleton-based sampling
+#     ./optuna/run_tuning_1layer.sh random    # tune generic sampling
 #
 # Overridable env vars (set before invoking):
-#     CSNN_BUILD_DIR   default: ../cmake-build-release
-#     DATA             default: ../hog/kth_fullframes_tvt_g4_80x60.npy
+#     CSNN_BUILD_DIR   default: cmake-build-release
+#     DATA             default: ../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy
 #     INPUT_ROOT       default: /home/mmuntean/kth_organized_tvt/
 #     N_TRIALS         default: 50
 #     N_SEEDS          default: 5
@@ -30,14 +30,14 @@ if [ "$SAMPLER" != "hog" ] && [ "$SAMPLER" != "random" ]; then
 fi
 
 CSNN_BUILD_DIR="${CSNN_BUILD_DIR:-cmake-build-release}"
-DATA="${DATA:-../hog/kth_fullframes_tvt_19_f5_g2_80x60.npy}"
+DATA="${DATA:-../hog/kth_fullframes_tvt_19_f10_g2_runfix_80x60.npy}"
 INPUT_ROOT="${INPUT_ROOT:-/home/mmuntean/kth_organized_tvt/}"
 N_TRIALS="${N_TRIALS:-50}"
 N_SEEDS="${N_SEEDS:-5}"
 N_JOBS="${N_JOBS:-32}"
 EPOCHS="${EPOCHS:-100}"
 STUDY_SUFFIX="${STUDY_SUFFIX:-}"
-POOL_ST="${POOL_ST:-2}"
+POOL_ST="${POOL_ST:-1}"
 
 
 if [ -n "$STUDY_SUFFIX" ]; then
